@@ -42,6 +42,9 @@ static int callactive;		      /**< Do we have incoming call */
 static int cs_cmd_quit(struct re_printf *pf, const char *data, const size_t datalen, const int line);
 static int cs_cmd_wait(struct re_printf *pf, const char *data, const size_t datalen, const int line);
 static int cs_cmd_verbose(struct re_printf *pf, const char *data, const size_t datalen, const int line);
+static int cs_cmd_noop(struct re_printf *pf, const char *data, const size_t datalen, const int line);
+static int cs_cmd_ring(struct re_printf *pf, const char *data, const size_t datalen, const int line);
+static int cs_cmd_hangup(struct re_printf *pf, const char *data, const size_t datalen, const int line);
 
 struct s_script_commands {
 	enum sc_type type;		/**< Command ENUM */
@@ -54,6 +57,13 @@ struct s_script_commands {
 	{ VERBOSE, "verbose", 1, &cs_cmd_verbose },
 	{ WAIT, "wait", 1, &cs_cmd_wait },
 	{ QUIT, "quit", 0, &cs_cmd_quit },
+	{ NOOP, "noop", 0, &cs_cmd_noop },
+	{ RING, "ring", 0, &cs_cmd_ring },
+	// { PLAY, "play", 0, &cs_cmd_play },
+	// { LOOPPLAY, "loopplay", 0, &cs_cmd_loopplay },
+	// { SET, "set", 0, &cs_cmd_set },
+	{ HANGUP, "hangup", 0, &cs_cmd_hangup },
+	// { LOG, "log", 0, &cs_cmd_log },
 };
 
 /*! \brief Find command if it exists 
@@ -72,6 +82,47 @@ static struct s_script_commands *find_command(char *cmd)
 		}
 	}
 	return NULL;
+}
+
+/*! \brief Hangup: Hang up call
+ *
+ * Syntax: hangup
+ */
+static int cs_cmd_hangup(struct re_printf *pf, const char *data, const size_t datalen, const int line)
+{
+	int err;
+
+	err = re_hprintf(pf, "Hangup: %s\n", data);
+
+	/* XXX Kill the call */
+        return err;
+}
+
+/*! \brief Noop: Do nothing
+ *
+ * Syntax: noop <text>
+ */
+static int cs_cmd_noop(struct re_printf *pf, const char *data, const size_t datalen, const int line)
+{
+	int err;
+
+	err = re_hprintf(pf, "Noop: %s\n", data);
+
+        return err;
+}
+
+/*! \brief Ring: Turn channel into ringing mode
+ *
+ * Syntax: ring
+ */
+static int cs_cmd_ring(struct re_printf *pf, const char *data, const size_t datalen, const int line)
+{
+	int err;
+
+	err = re_hprintf(pf, "Ring: %s\n", data);
+
+	/* XXX RIng Ring */
+        return err;
 }
 
 /*! \brief Verbose: Log to console
@@ -113,7 +164,7 @@ static int cs_cmd_quit(struct re_printf *pf, const char *data, const size_t data
 	/* This does not work */
         ua_stop_all(false);
 
-        return err;
+        return -2;	/* -2 is quit */
 }
 
 
@@ -166,7 +217,8 @@ static int callscript_read(struct re_printf *pf, const char *filename)
 	char fullfilename[256];
 	char linebuffer[256];
 	int err = 0;
-	int line=0;
+	int line = 0;
+	int stopreading = 0;
 
 	/* If we have a script directory and the script file name is not a full path
 	   use the default directory */
@@ -184,12 +236,12 @@ static int callscript_read(struct re_printf *pf, const char *filename)
 	re_fprintf(stderr, "\nCall Script File open for reading: %s\n", fullfilename);
 #endif
 	/* Ready to parse a file and have fun */
-	while (fgets(linebuffer, sizeof(linebuffer), fp) != NULL) {
+	while (fgets(linebuffer, sizeof(linebuffer), fp) != NULL && stopreading != -2) {
 		line++;
 #ifdef DEBUG
 		re_hprintf(pf, "DEBUG: %d - %s\n", line, linebuffer);
 #endif
-		cs_parse_line(pf, line, linebuffer);
+		stopreading = cs_parse_line(pf, line, linebuffer);
 	}
 	if (feof(fp)) {
 		re_hprintf(pf, "DEBUG: --EOF %d lines\n", line);
