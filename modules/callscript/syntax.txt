@@ -1,0 +1,32 @@
+	RING,           /* Change to ring status */
+        PLAY,           /* Play media file */
+        LOOPPLAY,       /* Play media file, loop */
+        WAIT,           /* Wait some time */
+        ANSWER,         /* Answer call */
+        HANGUP,         /* Hangup call */
+        SET,            /* Set various properties for the call */
+        LOG,            /* Log message to syslog */
+        NOOP            /* Do nothing */
+
+# Command examples
+set	calltimeout	60
+	set <name> <value>,<value>
+	value
+		calltimeout
+		timeout - wait for DTMF
+		video	on off
+		audio	on off
+		codec	?
+
+wait	12
+	wait <time>
+ring
+	ring
+wait	30
+	wait <time>
+answer
+	answer <option>
+dtmflisten
+play skrep/wave.wav
+transfer 15
+hangup
