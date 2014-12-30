@@ -16,6 +16,8 @@ enum sc_type {
 	HANGUP,		/* Hangup call */
 	SET,		/* Set various properties for the call */
 	LOG,		/* Log message to syslog */
+	QUIT,		/* Exit application */
+	VERBOSE,	/* Log to console */
 	NOOP		/* Do nothing */
 	
 };
@@ -24,5 +26,6 @@ struct scriptentry {
 	int	prio;
 	enum sc_type type;
 	int	value;
+	char 	*arg;
 	struct scriptentry *next;
 };
