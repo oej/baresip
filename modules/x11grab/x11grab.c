@@ -3,6 +3,7 @@
  *
  * Copyright (C) 2010 Creytiv.com
  */
+#define _DEFAULT_SOURCE 1
 #define _BSD_SOURCE 1
 #include <unistd.h>
 #ifndef SOLARIS
@@ -16,13 +17,18 @@
 #include <baresip.h>
 
 
-/*
+/**
+ * @defgroup x11grab x11grab
+ *
+ * X11 window-grabbing video-source module
+ *
+ *
  * XXX: add option to select a specific X window and x,y offset
  */
 
 
 struct vidsrc_st {
-	struct vidsrc *vs;  /* inheritance */
+	const struct vidsrc *vs;  /* inheritance */
 	Display *disp;
 	XImage *image;
 	pthread_t thread;
@@ -94,13 +100,14 @@ static inline uint8_t *x11grab_read(struct vidsrc_st *st)
 }
 
 
-static void call_frame_handler(struct vidsrc_st *st, uint8_t *buf)
+static void call_frame_handler(struct vidsrc_st *st, uint8_t *buf,
+			       uint64_t timestamp)
 {
 	struct vidframe frame;
 
 	vidframe_init_buf(&frame, st->pixfmt, &st->size, buf);
 
-	st->frameh(&frame, st->arg);
+	st->frameh(&frame, timestamp, st->arg);
 }
 
 
@@ -112,6 +119,8 @@ static void *read_thread(void *arg)
 
 	while (st->run) {
 
+		uint64_t timestamp;
+
 		if (tmr_jiffies() < ts) {
 			sys_msleep(4);
 			continue;
@@ -121,9 +130,11 @@ static void *read_thread(void *arg)
 		if (!buf)
 			continue;
 
+		timestamp = ts * VIDEO_TIMEBASE / 1000;
+
 		ts += (1000/st->fps);
 
-		call_frame_handler(st, buf);
+		call_frame_handler(st, buf, timestamp);
 	}
 
 	return NULL;
@@ -144,12 +155,10 @@ static void destructor(void *arg)
 
 	if (st->disp)
 		XCloseDisplay(st->disp);
-
-	mem_deref(st->vs);
 }
 
 
-static int alloc(struct vidsrc_st **stp, struct vidsrc *vs,
+static int alloc(struct vidsrc_st **stp, const struct vidsrc *vs,
 		 struct media_ctx **ctx, struct vidsrc_prm *prm,
 		 const struct vidsz *size, const char *fmt,
 		 const char *dev, vidsrc_frame_h *frameh,
@@ -170,7 +179,7 @@ static int alloc(struct vidsrc_st **stp, struct vidsrc *vs,
 	if (!st)
 		return ENOMEM;
 
-	st->vs     = mem_ref(vs);
+	st->vs     = vs;
 	st->size   = *size;
 	st->fps    = prm->fps;
 	st->frameh = frameh;
@@ -199,7 +208,8 @@ static int alloc(struct vidsrc_st **stp, struct vidsrc *vs,
 
 static int x11grab_init(void)
 {
-	return vidsrc_register(&vidsrc, "x11grab", alloc, NULL);
+	return vidsrc_register(&vidsrc, baresip_vidsrcl(),
+			       "x11grab", alloc, NULL);
 }
 
 

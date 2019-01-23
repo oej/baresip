@@ -10,6 +10,13 @@
 #include <baresip.h>
 
 
+/**
+ * @defgroup uuid uuid
+ *
+ * UUID generator and loader
+ */
+
+
 enum { UUID_LEN = 36 };
 
 
@@ -71,6 +78,8 @@ static int uuid_load(const char *file, char *uuid, size_t sz)
 		err = errno;
 
 	(void)fclose(f);
+
+	debug("uuid: loaded UUID %s from file %s\n", uuid, file);
 
 	return err;
 }

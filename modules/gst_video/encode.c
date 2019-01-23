@@ -4,7 +4,7 @@
  * Copyright (C) 2010 - 2013 Creytiv.com
  * Copyright (C) 2014 Fadeev Alexander
  */
-
+#define _DEFAULT_SOURCE 1
 #define __USE_POSIX199309
 #define _BSD_SOURCE 1
 #include <stdlib.h>
@@ -168,10 +168,17 @@ static void internal_appsink_new_buffer(GstElement *sink,
 	g_signal_emit_by_name(sink, "pull-buffer", &buffer);
 
 	if (buffer) {
+		GstClockTime ts;
+		uint64_t rtp_ts;
+
 		guint8 *data = GST_BUFFER_DATA(buffer);
 		guint size = GST_BUFFER_SIZE(buffer);
 
-		h264_packetize(data, size, st->pktsize,
+		ts = GST_BUFFER_TIMESTAMP(buffer);
+
+		rtp_ts = (uint64_t)((90000ULL*ts) / 1000000000UL );
+
+		h264_packetize(rtp_ts, data, size, st->pktsize,
 			       st->pkth, st->pkth_arg);
 
 		gst_buffer_unref(buffer);
@@ -275,7 +282,7 @@ static int gst_encoder_init(struct videnc_state *st, int width, int height,
 
 
 static int gst_video_push(struct videnc_state *st, const uint8_t *src,
-			  size_t size)
+			  size_t size, uint64_t timestamp)
 {
 	GstBuffer *buffer;
 	int ret = 0;
@@ -316,6 +323,8 @@ static int gst_video_push(struct videnc_state *st, const uint8_t *src,
 	GST_BUFFER_MALLOCDATA(buffer) = (guint8 *)src;
 	GST_BUFFER_SIZE(buffer) = (guint)size;
 	GST_BUFFER_DATA(buffer) = GST_BUFFER_MALLOCDATA(buffer);
+
+	buffer->timestamp = timestamp * 1000000000ULL / VIDEO_TIMEBASE;
 
 	ret = gst_app_src_push_buffer((GstAppSrc *)st->source, buffer);
 
@@ -430,7 +439,8 @@ static void param_handler(const struct pl *name, const struct pl *val,
 
 int gst_video_encode_update(struct videnc_state **vesp,
 			    const struct vidcodec *vc,
-			    struct videnc_param *prm, const char *fmtp)
+			    struct videnc_param *prm, const char *fmtp,
+			    videnc_packet_h *pkth, void *arg)
 {
 	struct videnc_state *ves;
 	int err = 0;
@@ -467,8 +477,10 @@ int gst_video_encode_update(struct videnc_state **vesp,
 	ves->bitrate = prm->bitrate;
 	ves->pktsize = prm->pktsize;
 	ves->fps     = prm->fps;
+	ves->pkth    = pkth;
+	ves->pkth_arg = arg;
 
-	info("gst_video: video encoder %s: %d fps, %d bit/s, pktsize=%u\n",
+	info("gst_video: video encoder %s: %.2f fps, %d bit/s, pktsize=%u\n",
 	      vc->name, prm->fps, prm->bitrate, prm->pktsize);
 
 	return err;
@@ -476,15 +488,14 @@ int gst_video_encode_update(struct videnc_state **vesp,
 
 
 int gst_video_encode(struct videnc_state *st, bool update,
-		     const struct vidframe *frame,
-		     videnc_packet_h *pkth, void *arg)
+		     const struct vidframe *frame, uint64_t timestamp)
 {
 	uint8_t *data;
 	size_t size;
 	int height;
 	int err;
 
-	if (!st || !frame || !pkth || frame->fmt != VID_FMT_YUV420P)
+	if (!st || !frame || frame->fmt != VID_FMT_YUV420P)
 		return EINVAL;
 
 	if (!st->gst_inited || !vidsz_cmp(&st->size, &frame->size)) {
@@ -496,9 +507,6 @@ int gst_video_encode(struct videnc_state *st, bool update,
 			warning("gst_video codec: gst_video_alloc failed\n");
 			return err;
 		}
-
-		st->pkth = pkth;
-		st->pkth_arg = arg;
 
 		/* To detect if requested size was changed. */
 		st->size = frame->size;
@@ -530,5 +538,5 @@ int gst_video_encode(struct videnc_state *st, bool update,
 	memcpy(&data[size], frame->data[2], frame->linesize[2] * height * 0.5);
 	size += frame->linesize[2] * height * 0.5;
 
-	return gst_video_push(st, data, size);
+	return gst_video_push(st, data, size, timestamp);
 }

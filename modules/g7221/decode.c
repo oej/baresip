@@ -6,6 +6,9 @@
 
 #include <re.h>
 #include <baresip.h>
+
+#define G722_1_EXPOSE_INTERNAL_STRUCTURES
+
 #include <g722_1.h>
 #include "g7221.h"
 
@@ -45,7 +48,8 @@ int g7221_decode_update(struct audec_state **adsp, const struct aucodec *ac,
 }
 
 
-int g7221_decode(struct audec_state *ads, int16_t *sampv, size_t *sampc,
+int g7221_decode(struct audec_state *ads,
+		 int fmt, void *sampv, size_t *sampc,
 		 const uint8_t *buf, size_t len)
 {
 	size_t framec;

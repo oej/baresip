@@ -7,16 +7,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <re.h>
+#include <rem_au.h>
 #include <baresip.h>
 #define SPANDSP_EXPOSE_INTERNAL_STRUCTURES 1
 #include <spandsp.h>
 
 
-/*
-  http://www.soft-switch.org/spandsp-modules.html
- */
-
-/* From RFC 3551:
+/**
+ * @defgroup g722 g722
+ *
+ * The G.722 audio codec
+ *
+ * ## From RFC 3551:
 
  4.5.2 G722
 
@@ -32,7 +34,13 @@
    that value was erroneously assigned in RFC 1890 and must remain
    unchanged for backward compatibility.  The octet rate or sample-pair
    rate is 8,000 Hz.
+
+   ##   Reference:
+
+  http://www.soft-switch.org/spandsp-modules.html
+
  */
+
 
 enum {
 	G722_SAMPLE_RATE = 16000,
@@ -118,9 +126,12 @@ static int decode_update(struct audec_state **adsp,
 
 
 static int encode(struct auenc_state *st, uint8_t *buf, size_t *len,
-		  const int16_t *sampv, size_t sampc)
+		  int fmt, const void *sampv, size_t sampc)
 {
 	int n;
+
+	if (fmt != AUFMT_S16LE)
+		return ENOTSUP;
 
 	n = g722_encode(&st->enc, buf, sampv, (int)sampc);
 	if (n <= 0) {
@@ -136,13 +147,16 @@ static int encode(struct auenc_state *st, uint8_t *buf, size_t *len,
 }
 
 
-static int decode(struct audec_state *st, int16_t *sampv, size_t *sampc,
+static int decode(struct audec_state *st, int fmt, void *sampv, size_t *sampc,
 		  const uint8_t *buf, size_t len)
 {
 	int n;
 
 	if (!st || !sampv || !buf)
 		return EINVAL;
+
+	if (fmt != AUFMT_S16LE)
+		return ENOTSUP;
 
 	n = g722_decode(&st->dec, sampv, buf, (int)len);
 	if (n < 0)
@@ -155,7 +169,7 @@ static int decode(struct audec_state *st, int16_t *sampv, size_t *sampc,
 
 
 static struct aucodec g722 = {
-	LE_INIT, "9", "G722", 8000, 1, NULL,
+	LE_INIT, "9", "G722", 16000, 8000, 1, 1, NULL,
 	encode_update, encode,
 	decode_update, decode, NULL,
 	NULL, NULL
@@ -164,7 +178,7 @@ static struct aucodec g722 = {
 
 static int module_init(void)
 {
-	aucodec_register(&g722);
+	aucodec_register(baresip_aucodecl(), &g722);
 	return 0;
 }
 
@@ -176,7 +190,6 @@ static int module_close(void)
 }
 
 
-/** Module exports */
 EXPORT_SYM const struct mod_export DECL_EXPORTS(g722) = {
 	"g722",
 	"codec",

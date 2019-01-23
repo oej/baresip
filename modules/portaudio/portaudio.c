@@ -26,7 +26,7 @@
 
 
 struct ausrc_st {
-	struct ausrc *as;      /* inheritance */
+	const struct ausrc *as;      /* inheritance */
 	PaStream *stream_rd;
 	ausrc_read_h *rh;
 	void *arg;
@@ -35,7 +35,7 @@ struct ausrc_st {
 };
 
 struct auplay_st {
-	struct auplay *ap;      /* inheritance */
+	const struct auplay *ap;      /* inheritance */
 	PaStream *stream_wr;
 	auplay_write_h *wh;
 	void *arg;
@@ -99,6 +99,17 @@ static int write_callback(const void *inputBuffer, void *outputBuffer,
 }
 
 
+static PaSampleFormat aufmt_to_pasampleformat(enum aufmt fmt)
+{
+	switch (fmt) {
+
+	case AUFMT_S16LE: return paInt16;
+	case AUFMT_FLOAT: return paFloat32;
+	default: return 0;
+	}
+}
+
+
 static int read_stream_open(struct ausrc_st *st, const struct ausrc_prm *prm,
 			    uint32_t dev)
 {
@@ -109,7 +120,7 @@ static int read_stream_open(struct ausrc_st *st, const struct ausrc_prm *prm,
 	memset(&prm_in, 0, sizeof(prm_in));
 	prm_in.device           = dev;
 	prm_in.channelCount     = prm->ch;
-	prm_in.sampleFormat     = paInt16;
+	prm_in.sampleFormat     = aufmt_to_pasampleformat(prm->fmt);
 	prm_in.suggestedLatency = 0.100;
 
 	st->stream_rd = NULL;
@@ -142,7 +153,7 @@ static int write_stream_open(struct auplay_st *st,
 	memset(&prm_out, 0, sizeof(prm_out));
 	prm_out.device           = dev;
 	prm_out.channelCount     = prm->ch;
-	prm_out.sampleFormat     = paInt16;
+	prm_out.sampleFormat     = aufmt_to_pasampleformat(prm->fmt);
 	prm_out.suggestedLatency = 0.100;
 
 	st->stream_wr = NULL;
@@ -175,8 +186,6 @@ static void ausrc_destructor(void *arg)
 		Pa_AbortStream(st->stream_rd);
 		Pa_CloseStream(st->stream_rd);
 	}
-
-	mem_deref(st->as);
 }
 
 
@@ -190,12 +199,10 @@ static void auplay_destructor(void *arg)
 		Pa_AbortStream(st->stream_wr);
 		Pa_CloseStream(st->stream_wr);
 	}
-
-	mem_deref(st->ap);
 }
 
 
-static int src_alloc(struct ausrc_st **stp, struct ausrc *as,
+static int src_alloc(struct ausrc_st **stp, const struct ausrc *as,
 		     struct media_ctx **ctx,
 		     struct ausrc_prm *prm, const char *device,
 		     ausrc_read_h *rh, ausrc_error_h *errh, void *arg)
@@ -220,7 +227,7 @@ static int src_alloc(struct ausrc_st **stp, struct ausrc *as,
 	if (!st)
 		return ENOMEM;
 
-	st->as  = mem_ref(as);
+	st->as  = as;
 	st->rh  = rh;
 	st->arg = arg;
 	st->ch  = prm->ch;
@@ -241,7 +248,7 @@ static int src_alloc(struct ausrc_st **stp, struct ausrc *as,
 }
 
 
-static int play_alloc(struct auplay_st **stp, struct auplay *ap,
+static int play_alloc(struct auplay_st **stp, const struct auplay *ap,
 		      struct auplay_prm *prm, const char *device,
 		      auplay_write_h *wh, void *arg)
 {
@@ -263,7 +270,7 @@ static int play_alloc(struct auplay_st **stp, struct auplay *ap,
 	if (!st)
 		return ENOMEM;
 
-	st->ap  = mem_ref(ap);
+	st->ap  = ap;
 	st->wh  = wh;
 	st->arg = arg;
 	st->ch  = prm->ch;
@@ -309,10 +316,12 @@ static int pa_init(void)
 	}
 
 	if (paNoDevice != Pa_GetDefaultInputDevice())
-		err |= ausrc_register(&ausrc, "portaudio", src_alloc);
+		err |= ausrc_register(&ausrc, baresip_ausrcl(),
+				      "portaudio", src_alloc);
 
 	if (paNoDevice != Pa_GetDefaultOutputDevice())
-		err |= auplay_register(&auplay, "portaudio", play_alloc);
+		err |= auplay_register(&auplay, baresip_auplayl(),
+				       "portaudio", play_alloc);
 
 	return err;
 }

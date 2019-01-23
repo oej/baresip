@@ -1,15 +1,27 @@
 /**
  * @file opengles.c Video driver for OpenGLES
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 - 2015 Creytiv.com
  */
 
 #include <re.h>
 #include <rem.h>
 #include <baresip.h>
+#ifdef DARWIN
 #include <OpenGLES/ES1/gl.h>
 #include <OpenGLES/ES1/glext.h>
+#else
+#include <GLES/gl.h>
+#include <GLES/glext.h>
+#endif
 #include "opengles.h"
+
+
+/**
+ * @defgroup opengles opengles
+ *
+ * Video display module for OpenGLES on Android
+ */
 
 
 static struct vidisp *vid;
@@ -201,14 +213,15 @@ static void destructor(void *arg)
 	glDeleteFramebuffersOES(1, &st->framebuffer);
 	glDeleteRenderbuffersOES(1, &st->renderbuffer);
 
+#ifdef DARWIN
 	context_destroy(st);
+#endif
 
 	mem_deref(st->vf);
-	mem_deref(st->vd);
 }
 
 
-static int opengles_alloc(struct vidisp_st **stp, struct vidisp *vd,
+static int opengles_alloc(struct vidisp_st **stp, const struct vidisp *vd,
 			  struct vidisp_prm *prm, const char *dev,
 			  vidisp_resize_h *resizeh,
 			  void *arg)
@@ -225,13 +238,15 @@ static int opengles_alloc(struct vidisp_st **stp, struct vidisp *vd,
 	if (!st)
 		return ENOMEM;
 
-	st->vd = mem_ref(vd);
+	st->vd = vd;
 
+#ifdef DARWIN
 	err = context_init(st);
 	if (err)
 		goto out;
 
  out:
+#endif
 	if (err)
 		mem_deref(st);
 	else
@@ -242,11 +257,12 @@ static int opengles_alloc(struct vidisp_st **stp, struct vidisp *vd,
 
 
 static int opengles_display(struct vidisp_st *st, const char *title,
-			    const struct vidframe *frame)
+			    const struct vidframe *frame, uint64_t timestamp)
 {
 	int err;
 
 	(void)title;
+	(void)timestamp;
 
 	if (!st->vf) {
 		if (frame->size.w & 3) {
@@ -261,7 +277,9 @@ static int opengles_display(struct vidisp_st *st, const char *title,
 
 	vidconv(st->vf, frame, NULL);
 
+#ifdef DARWIN
 	context_render(st);
+#endif
 
 	return 0;
 }
@@ -269,7 +287,8 @@ static int opengles_display(struct vidisp_st *st, const char *title,
 
 static int module_init(void)
 {
-	return vidisp_register(&vid, "opengles", opengles_alloc, NULL,
+	return vidisp_register(&vid, baresip_vidispl(),
+			       "opengles", opengles_alloc, NULL,
 			       opengles_display, NULL);
 }
 

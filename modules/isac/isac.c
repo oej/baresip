@@ -8,7 +8,11 @@
 #include "isac.h"
 
 
-/*
+/**
+ * @defgroup isac isac
+ *
+ * iSAC audio codec
+ *
  * draft-ietf-avt-rtp-isac-04
  */
 
@@ -182,11 +186,11 @@ static int plc(struct audec_state *st, int16_t *sampv, size_t *sampc)
 
 static struct aucodec isacv[] = {
 	{
-	LE_INIT, 0, "isac", 32000, 1, NULL,
+	LE_INIT, 0, "isac", 32000, 32000, 1, 1, NULL,
 	encode_update, encode, decode_update, decode, plc, NULL, NULL
 	},
 	{
-	LE_INIT, 0, "isac", 16000, 1, NULL,
+	LE_INIT, 0, "isac", 16000, 16000, 1, 1, NULL,
 	encode_update, encode, decode_update, decode, plc, NULL, NULL
 	}
 };
@@ -197,7 +201,7 @@ static int module_init(void)
 	unsigned i;
 
 	for (i=0; i<ARRAY_SIZE(isacv); i++)
-		aucodec_register(&isacv[i]);
+		aucodec_register(baresip_aucodecl(), &isacv[i]);
 
 	return 0;
 }
@@ -214,7 +218,6 @@ static int module_close(void)
 }
 
 
-/** Module exports */
 EXPORT_SYM const struct mod_export DECL_EXPORTS(isac) = {
 	"isac",
 	"codec",

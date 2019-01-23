@@ -11,6 +11,22 @@
 #include "rst.h"
 
 
+/**
+ * @defgroup rst rst
+ *
+ * Audio and video source module using mpg123 as input
+ *
+ * The module 'rst' is using the mpg123 to play streaming
+ * media (MP3) and provide this as an internal audio/video source.
+ *
+ * Example config:
+ \verbatim
+  audio_source        rst,http://relay.slayradio.org:8000/
+  video_source        rst,http://relay.slayradio.org:8000/
+ \endverbatim
+ */
+
+
 enum {
 	RETRY_WAIT = 10000,
 };
@@ -292,7 +308,8 @@ static int rst_connect(struct rst *rst)
 		}
 	}
 	else {
-		err = dnsc_query(&rst->dnsq, net_dnsc(), rst->host, DNS_TYPE_A,
+		err = dnsc_query(&rst->dnsq, net_dnsc(baresip_network()),
+				 rst->host, DNS_TYPE_A,
 				 DNS_CLASS_IN, true, dns_handler, rst);
 		if (err) {
 			warning("rst: dns query error: %m\n", err);

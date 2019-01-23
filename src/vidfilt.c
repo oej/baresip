@@ -8,20 +8,18 @@
 #include "core.h"
 
 
-static struct list vfl;
-
-
 /**
  * Register a new Video Filter
  *
- * @param vf Video Filter to register
+ * @param vidfiltl List of Video-Filters
+ * @param vf       Video Filter to register
  */
-void vidfilt_register(struct vidfilt *vf)
+void vidfilt_register(struct list *vidfiltl, struct vidfilt *vf)
 {
 	if (!vf)
 		return;
 
-	list_append(&vfl, &vf->le, vf);
+	list_append(vidfiltl, &vf->le, vf);
 
 	info("vidfilt: %s\n", vf->name);
 }
@@ -41,17 +39,6 @@ void vidfilt_unregister(struct vidfilt *vf)
 }
 
 
-/**
- * Get the list of registered Video Filters
- *
- * @return List of Video Filters
- */
-struct list *vidfilt_list(void)
-{
-	return &vfl;
-}
-
-
 static void vidfilt_enc_destructor(void *arg)
 {
 	struct vidfilt_enc_st *st = arg;
@@ -60,6 +47,15 @@ static void vidfilt_enc_destructor(void *arg)
 }
 
 
+/**
+ * Allocate a video-filter encode state and append to list
+ *
+ * @param filtl List of video-filter states
+ * @param ctx   Media context
+ * @param vf    Video filter
+ *
+ * @return 0 if success, otherwise errorcode
+ */
 int vidfilt_enc_append(struct list *filtl, void **ctx,
 		       const struct vidfilt *vf)
 {
@@ -92,6 +88,15 @@ static void vidfilt_dec_destructor(void *arg)
 }
 
 
+/**
+ * Allocate a video-filter decode state and append to list
+ *
+ * @param filtl List of video-filter states
+ * @param ctx   Media context
+ * @param vf    Video filter
+ *
+ * @return 0 if success, otherwise errorcode
+ */
 int vidfilt_dec_append(struct list *filtl, void **ctx,
 		       const struct vidfilt *vf)
 {

@@ -3,6 +3,7 @@
  *
  * Copyright (C) 2010 Creytiv.com
  */
+#define _DEFAULT_SOURCE 1
 #define _POSIX_SOURCE 1
 #include <sys/types.h>
 #include <sys/time.h>
@@ -34,12 +35,15 @@ static struct auplay *auplay;
 
 
 int alsa_reset(snd_pcm_t *pcm, uint32_t srate, uint32_t ch,
-	       uint32_t num_frames)
+	       uint32_t num_frames,
+	       snd_pcm_format_t pcmfmt)
 {
 	snd_pcm_hw_params_t *hw_params = NULL;
-	const snd_pcm_format_t pcmfmt = SND_PCM_FORMAT_S16;
 	snd_pcm_uframes_t period = num_frames, bufsize = num_frames * 4;
 	int err;
+
+	debug("alsa: reset: srate=%u, ch=%u, num_frames=%u, pcmfmt=%s\n",
+	      srate, ch, num_frames, snd_pcm_format_name(pcmfmt));
 
 	err = snd_pcm_hw_params_malloc(&hw_params);
 	if (err < 0) {
@@ -124,12 +128,26 @@ int alsa_reset(snd_pcm_t *pcm, uint32_t srate, uint32_t ch,
 }
 
 
+snd_pcm_format_t aufmt_to_alsaformat(enum aufmt fmt)
+{
+	switch (fmt) {
+
+	case AUFMT_S16LE:    return SND_PCM_FORMAT_S16;
+	case AUFMT_FLOAT:    return SND_PCM_FORMAT_FLOAT;
+	case AUFMT_S24_3LE:  return SND_PCM_FORMAT_S24_3LE;
+	default:             return SND_PCM_FORMAT_UNKNOWN;
+	}
+}
+
+
 static int alsa_init(void)
 {
 	int err;
 
-	err  = ausrc_register(&ausrc, "alsa", alsa_src_alloc);
-	err |= auplay_register(&auplay, "alsa", alsa_play_alloc);
+	err  = ausrc_register(&ausrc, baresip_ausrcl(),
+			      "alsa", alsa_src_alloc);
+	err |= auplay_register(&auplay, baresip_auplayl(),
+			       "alsa", alsa_play_alloc);
 
 	return err;
 }
@@ -139,6 +157,10 @@ static int alsa_close(void)
 {
 	ausrc  = mem_deref(ausrc);
 	auplay = mem_deref(auplay);
+
+	/* releases all resources of the global configuration tree,
+	   and sets snd_config to NULL. */
+	snd_config_update_free_global();
 
 	return 0;
 }

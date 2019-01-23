@@ -47,9 +47,28 @@ static int cmd_offline(struct re_printf *pf, void *arg)
 
 
 static const struct cmd cmdv[] = {
-	{'[', 0, "Set presence online",   cmd_online  },
-	{']', 0, "Set presence offline",  cmd_offline },
+	{"presence_online",  '[', 0, "Set presence online",   cmd_online  },
+	{"presence_offline", ']', 0, "Set presence offline",  cmd_offline },
 };
+
+
+static void event_handler(struct ua *ua, enum ua_event ev,
+			  struct call *call, const char *prm, void *arg)
+{
+	(void)call;
+	(void)prm;
+	(void)arg;
+
+	debug("presence: ua=%p got event %d (%s)\n", ua, ev,
+	      uag_event_str(ev));
+
+	if (ev == UA_EVENT_SHUTDOWN) {
+
+		publisher_close();
+		notifier_close();
+		subscriber_close_all();
+	}
+}
 
 
 static int module_init(void)
@@ -68,13 +87,23 @@ static int module_init(void)
 	if (err)
 		return err;
 
-	return cmd_register(cmdv, ARRAY_SIZE(cmdv));
+	err = cmd_register(baresip_commands(), cmdv, ARRAY_SIZE(cmdv));
+	if (err)
+		return err;
+
+	err = uag_event_register(event_handler, NULL);
+	if (err)
+		return err;
+
+	return err;
 }
 
 
 static int module_close(void)
 {
-	cmd_unregister(cmdv);
+	uag_event_unregister(event_handler);
+
+	cmd_unregister(baresip_commands(), cmdv);
 
 	publisher_close();
 

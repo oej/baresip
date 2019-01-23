@@ -18,11 +18,10 @@ static void destructor(void *arg)
 
 	list_unlink(&st->le);
 	mem_deref(st->device);
-	mem_deref(st->vs);
 }
 
 
-int vidbridge_src_alloc(struct vidsrc_st **stp, struct vidsrc *vs,
+int vidbridge_src_alloc(struct vidsrc_st **stp, const struct vidsrc *vs,
 			struct media_ctx **ctx, struct vidsrc_prm *prm,
 			const struct vidsz *size, const char *fmt,
 			const char *dev, vidsrc_frame_h *frameh,
@@ -31,20 +30,20 @@ int vidbridge_src_alloc(struct vidsrc_st **stp, struct vidsrc *vs,
 	struct vidsrc_st *st;
 	int err;
 	(void)ctx;
-	(void)prm;
 	(void)fmt;
 	(void)errorh;
 
-	if (!stp || !size || !frameh)
+	if (!stp || !prm || !size || !frameh)
 		return EINVAL;
 
 	st = mem_zalloc(sizeof(*st), destructor);
 	if (!st)
 		return ENOMEM;
 
-	st->vs     = mem_ref(vs);
+	st->vs     = vs;
 	st->frameh = frameh;
 	st->arg    = arg;
+	st->fps    = prm->fps;
 
 	err = str_dup(&st->device, dev);
 	if (err)
@@ -83,12 +82,12 @@ struct vidsrc_st *vidbridge_src_find(const char *device)
 }
 
 
-void vidbridge_src_input(const struct vidsrc_st *st,
-			 const struct vidframe *frame)
+void vidbridge_src_input(struct vidsrc_st *st,
+			 const struct vidframe *frame, uint64_t timestamp)
 {
 	if (!st || !frame)
 		return;
 
 	if (st->frameh)
-		st->frameh((struct vidframe *)frame, st->arg);
+		st->frameh((struct vidframe *)frame, timestamp, st->arg);
 }

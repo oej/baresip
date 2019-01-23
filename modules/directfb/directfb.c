@@ -11,7 +11,7 @@
 
 
 struct vidisp_st {
-	struct vidisp *vd;             /**< Inheritance (1st)     */
+	const struct vidisp *vd;       /**< Inheritance (1st)     */
 	struct vidsz size;             /**< Current size          */
 	IDirectFBWindow *window;       /**< DirectFB Window       */
 	IDirectFBSurface *surface;     /**< Surface for pixels    */
@@ -33,12 +33,10 @@ static void destructor(void *arg)
 		st->window->Release(st->window);
 	if (st->layer)
 		st->layer->Release(st->layer);
-
-	mem_deref(st->vd);
 }
 
 
-static int alloc(struct vidisp_st **stp, struct vidisp *vd,
+static int alloc(struct vidisp_st **stp, const struct vidisp *vd,
 		 struct vidisp_prm *prm, const char *dev,
 		 vidisp_resize_h *resizeh, void *arg)
 {
@@ -55,7 +53,7 @@ static int alloc(struct vidisp_st **stp, struct vidisp *vd,
 	if (!st)
 		return ENOMEM;
 
-	st->vd = mem_ref(vd);
+	st->vd = vd;
 
 	dfb->GetDisplayLayer(dfb, DLID_PRIMARY, &st->layer);
 
@@ -69,13 +67,14 @@ static int alloc(struct vidisp_st **stp, struct vidisp *vd,
 
 
 static int display(struct vidisp_st *st, const char *title,
-		   const struct vidframe *frame)
+		   const struct vidframe *frame, uint64_t timestamp)
 {
 	void *pixels;
 	int pitch, i;
 	unsigned h;
 	uint8_t *p;
 	(void) title;
+	(void) timestamp;
 
 	if (!vidsz_cmp(&st->size, &frame->size)) {
 		if (st->size.w && st->size.h) {
@@ -162,7 +161,8 @@ static int module_init(void)
 		return (int) ret;
 	}
 
-	err = vidisp_register(&vid, "directfb", alloc, NULL, display, hide);
+	err = vidisp_register(&vid, baresip_vidispl(),
+			      "directfb", alloc, NULL, display, hide);
 	if (err)
 		return err;
 

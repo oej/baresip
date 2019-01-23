@@ -106,19 +106,21 @@ static void ua_event_handler(struct ua *ua,
 
 static int module_init(void)
 {
-	uag_event_register( ua_event_handler, NULL );
-
 	if ( mkfifo( DTMF_OUT, S_IWUSR | S_IRUSR ) ) {
-		error("Creation of the FIFO errored."
-		      " This might cause issues.\n");
+		int err = errno;
+		warning("Creation of the FIFO errored."
+		      " This might cause issues. (%m)\n", err);
+		return err;
 	}
 
 	fd = fopen( DTMF_OUT , "w+" );
 
 	if ( fd == 0 ){
-		error("Opening of the FIFO errored."
+		warning("Opening of the FIFO errored."
 		      " This might cause issues.\n");
 	}
+
+	uag_event_register( ua_event_handler, NULL );
 
 	return 0;
 }
@@ -126,7 +128,12 @@ static int module_init(void)
 
 static int module_close(void)
 {
-	fclose(fd);
+	uag_event_unregister(ua_event_handler);
+
+	if (fd) {
+		fclose(fd);
+		fd = NULL;
+	}
 
 	unlink(DTMF_OUT);
 

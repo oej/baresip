@@ -1,5 +1,5 @@
 /**
- * @file gst_video.c  Video codecs using Gstreamer
+ * @file gst_video/gst_video.c  Video codecs using Gstreamer
  *
  * Copyright (C) 2010 Creytiv.com
  * Copyright (C) 2014 Fadeev Alexander
@@ -40,7 +40,7 @@ static int module_init(void)
 {
 	gst_init(NULL, NULL);
 
-	vidcodec_register(&h264);
+	vidcodec_register(baresip_vidcodecl(), &h264);
 
 	info("gst_video: using gstreamer H.264 encoder\n");
 

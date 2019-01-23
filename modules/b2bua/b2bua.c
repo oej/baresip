@@ -102,7 +102,7 @@ static int new_session(struct call *call)
 
 	sess->call_in = call;
 	err = ua_connect(ua_out, &sess->call_out, call_peeruri(call),
-			 call_localuri(call), NULL,
+			 call_localuri(call),
 			 call_has_video(call) ? VIDMODE_ON : VIDMODE_OFF);
 	if (err) {
 		warning("b2bua: ua_connect failed (%m)\n", err);
@@ -187,7 +187,7 @@ static int b2bua_status(struct re_printf *pf, void *arg)
 
 
 static const struct cmd cmdv[] = {
-	{'b',       0, "b2bua status", b2bua_status },
+	{"b2bua", 0,       0, "b2bua status", b2bua_status },
 };
 
 
@@ -207,13 +207,16 @@ static int module_init(void)
 		return ENOENT;
 	}
 
-	err = cmd_register(cmdv, ARRAY_SIZE(cmdv));
+	err = cmd_register(baresip_commands(), cmdv, ARRAY_SIZE(cmdv));
 	if (err)
 		return err;
 
-	err = uag_event_register(ua_event_handler, 0);
+	err = uag_event_register(ua_event_handler, NULL);
 	if (err)
 		return err;
+
+	/* The inbound UA will handle all non-matching requests */
+	ua_set_catchall(ua_in, true);
 
 	debug("b2bua: module loaded\n");
 
@@ -232,7 +235,7 @@ static int module_close(void)
 	}
 
 	uag_event_unregister(ua_event_handler);
-	cmd_unregister(cmdv);
+	cmd_unregister(baresip_commands(), cmdv);
 
 	return 0;
 }

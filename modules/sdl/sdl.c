@@ -11,13 +11,20 @@
 #include "sdl.h"
 
 
+/**
+ * @defgroup sdl sdl
+ *
+ * Video display using Simple DirectMedia Layer (SDL)
+ */
+
+
 /** Local constants */
 enum {
 	KEY_RELEASE_VAL = 250  /**< Key release value in [ms] */
 };
 
 struct vidisp_st {
-	struct vidisp *vd;  /* inheritance */
+	const struct vidisp *vd;  /* inheritance */
 };
 
 /** Global SDL data */
@@ -73,7 +80,7 @@ static void timeout(void *arg)
 	tmr_start(&sdl.tmr, 1, event_handler, NULL);
 
 	/* Emulate key-release */
-	ui_input(0x00);
+	ui_input_key(baresip_uis(), KEYCODE_REL, NULL);
 }
 
 
@@ -117,7 +124,7 @@ static void event_handler(void *arg)
 				if (isprint(ch)) {
 					tmr_start(&sdl.tmr, KEY_RELEASE_VAL,
 						  timeout, NULL);
-					ui_input(ch);
+					ui_input_key(baresip_uis(), ch, NULL);
 				}
 				break;
 			}
@@ -129,7 +136,7 @@ static void event_handler(void *arg)
 			break;
 
 		case SDL_QUIT:
-			ui_input('q');
+			ui_input_key(baresip_uis(), 'q', NULL);
 			break;
 
 		default:
@@ -173,13 +180,13 @@ static void sdl_close(void)
 static void destructor(void *arg)
 {
 	struct vidisp_st *st = arg;
+	(void)st;
 
-	mem_deref(st->vd);
 	sdl_close();
 }
 
 
-static int alloc(struct vidisp_st **stp, struct vidisp *vd,
+static int alloc(struct vidisp_st **stp, const struct vidisp *vd,
 		 struct vidisp_prm *prm, const char *dev,
 		 vidisp_resize_h *resizeh, void *arg)
 {
@@ -197,7 +204,7 @@ static int alloc(struct vidisp_st **stp, struct vidisp *vd,
 	if (!st)
 		return ENOMEM;
 
-	st->vd = mem_ref(vd);
+	st->vd = vd;
 
 	sdl.resizeh = resizeh;
 	sdl.arg     = arg;
@@ -225,9 +232,10 @@ static int alloc(struct vidisp_st **stp, struct vidisp *vd,
  * @note: On Darwin, this must be called from the main thread
  */
 static int display(struct vidisp_st *st, const char *title,
-		   const struct vidframe *frame)
+		   const struct vidframe *frame, uint64_t timestamp)
 {
 	SDL_Rect rect;
+	(void)timestamp;
 
 	if (!st || !sdl.open)
 		return EINVAL;
@@ -299,7 +307,8 @@ static int display(struct vidisp_st *st, const char *title,
 
 static int module_init(void)
 {
-	return vidisp_register(&vid, "sdl", alloc, NULL, display, NULL);
+	return vidisp_register(&vid, baresip_vidispl(),
+			       "sdl", alloc, NULL, display, NULL);
 }
 
 

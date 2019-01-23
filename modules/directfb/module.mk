@@ -7,7 +7,8 @@
 
 MOD                := directfb
 $(MOD)_SRCS        += directfb.c
-$(MOD)_LFLAGS      += `pkg-config --libs directfb `
-CFLAGS             += `pkg-config --cflags directfb `
+$(MOD)_LFLAGS      += $(shell pkg-config --libs directfb)
+$(MOD)_CFLAGS      += $(shell pkg-config --cflags directfb \
+			| sed -e 's/-I/-isystem/g')
 
 include mk/mod.mk

@@ -5,6 +5,7 @@
  */
 
 #include <re.h>
+#include <rem.h>
 #include <baresip.h>
 #include <opus/opus.h>
 #include "opus.h"
@@ -63,7 +64,8 @@ int opus_decode_update(struct audec_state **adsp, const struct aucodec *ac,
 }
 
 
-int opus_decode_frm(struct audec_state *ads, int16_t *sampv, size_t *sampc,
+int opus_decode_frm(struct audec_state *ads,
+		    int fmt, void *sampv, size_t *sampc,
 		    const uint8_t *buf, size_t len)
 {
 	int n;
@@ -71,11 +73,29 @@ int opus_decode_frm(struct audec_state *ads, int16_t *sampv, size_t *sampc,
 	if (!ads || !sampv || !sampc || !buf)
 		return EINVAL;
 
-	n = opus_decode(ads->dec, buf, (opus_int32)len,
-			sampv, (int)(*sampc/ads->ch), 0);
-	if (n < 0) {
-		warning("opus: decode error: %s\n", opus_strerror(n));
-		return EPROTO;
+	switch (fmt) {
+
+	case AUFMT_S16LE:
+		n = opus_decode(ads->dec, buf, (opus_int32)len,
+				sampv, (int)(*sampc/ads->ch), 0);
+		if (n < 0) {
+			warning("opus: decode error: %s\n", opus_strerror(n));
+			return EPROTO;
+		}
+		break;
+
+	case AUFMT_FLOAT:
+		n = opus_decode_float(ads->dec, buf, (opus_int32)len,
+				      sampv, (int)(*sampc/ads->ch), 0);
+		if (n < 0) {
+			warning("opus: float decode error: %s\n",
+				opus_strerror(n));
+			return EPROTO;
+		}
+		break;
+
+	default:
+		return ENOTSUP;
 	}
 
 	*sampc = n * ads->ch;
@@ -84,16 +104,33 @@ int opus_decode_frm(struct audec_state *ads, int16_t *sampv, size_t *sampc,
 }
 
 
-int opus_decode_pkloss(struct audec_state *ads, int16_t *sampv, size_t *sampc)
+int opus_decode_pkloss(struct audec_state *ads,
+		       int fmt, void *sampv, size_t *sampc)
 {
 	int n;
 
 	if (!ads || !sampv || !sampc)
 		return EINVAL;
 
-	n = opus_decode(ads->dec, NULL, 0, sampv, (int)(*sampc/ads->ch), 0);
-	if (n < 0)
-		return EPROTO;
+	switch (fmt) {
+
+	case AUFMT_S16LE:
+		n = opus_decode(ads->dec, NULL, 0,
+				sampv, (int)(*sampc/ads->ch), 0);
+		if (n < 0)
+			return EPROTO;
+		break;
+
+	case AUFMT_FLOAT:
+		n = opus_decode_float(ads->dec, NULL, 0,
+				      sampv, (int)(*sampc/ads->ch), 0);
+		if (n < 0)
+			return EPROTO;
+		break;
+
+	default:
+		return ENOTSUP;
+	}
 
 	*sampc = n * ads->ch;
 

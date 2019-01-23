@@ -5,8 +5,8 @@
 #
 
 MOD		:= avformat
-$(MOD)_SRCS	+= avf.c
-$(MOD)_LFLAGS	+= -lavdevice -lavformat -lavcodec -lavutil -lswscale
+$(MOD)_SRCS	+= avformat.c
+$(MOD)_LFLAGS	+= -lavdevice -lavformat -lavcodec -lavutil
 CFLAGS          += -DUSE_AVFORMAT
 
 include mk/mod.mk

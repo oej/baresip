@@ -5,10 +5,17 @@
  */
 #include <stdlib.h>
 #include <string.h>
-#include <speex/speex.h>
 #include <speex/speex_echo.h>
 #include <re.h>
+#include <rem.h>
 #include <baresip.h>
+
+
+/**
+ * @defgroup speex_aec speex_aec
+ *
+ * Acoustic Echo Cancellation (AEC) from libspeexdsp
+ */
 
 
 struct speex_st {
@@ -45,7 +52,6 @@ static void dec_destructor(void *arg)
 }
 
 
-#ifdef SPEEX_SET_VBR_MAX_BITRATE
 static void speex_aec_destructor(void *arg)
 {
 	struct speex_st *st = arg;
@@ -65,6 +71,12 @@ static int aec_alloc(struct speex_st **stp, void **ctx, struct aufilt_prm *prm)
 
 	if (!stp || !ctx || !prm)
 		return EINVAL;
+
+	if (prm->fmt != AUFMT_S16LE) {
+		warning("speex_aec: unsupported sample format (%s)\n",
+			aufmt_name(prm->fmt));
+		return ENOTSUP;
+	}
 
 	if (*ctx) {
 		*stp = mem_ref(*ctx);
@@ -110,10 +122,12 @@ static int aec_alloc(struct speex_st **stp, void **ctx, struct aufilt_prm *prm)
 
 
 static int encode_update(struct aufilt_enc_st **stp, void **ctx,
-			 const struct aufilt *af, struct aufilt_prm *prm)
+			 const struct aufilt *af, struct aufilt_prm *prm,
+			 const struct audio *au)
 {
 	struct enc_st *st;
 	int err;
+	(void)au;
 
 	if (!stp || !ctx || !af || !prm)
 		return EINVAL;
@@ -137,10 +151,12 @@ static int encode_update(struct aufilt_enc_st **stp, void **ctx,
 
 
 static int decode_update(struct aufilt_dec_st **stp, void **ctx,
-			 const struct aufilt *af, struct aufilt_prm *prm)
+			 const struct aufilt *af, struct aufilt_prm *prm,
+			 const struct audio *au)
 {
 	struct dec_st *st;
 	int err;
+	(void)au;
 
 	if (!stp || !ctx || !af || !prm)
 		return EINVAL;
@@ -163,7 +179,7 @@ static int decode_update(struct aufilt_dec_st **stp, void **ctx,
 }
 
 
-static int encode(struct aufilt_enc_st *st, int16_t *sampv, size_t *sampc)
+static int encode(struct aufilt_enc_st *st, void *sampv, size_t *sampc)
 {
 	struct enc_st *est = (struct enc_st *)st;
 	struct speex_st *sp = est->st;
@@ -177,7 +193,7 @@ static int encode(struct aufilt_enc_st *st, int16_t *sampv, size_t *sampc)
 }
 
 
-static int decode(struct aufilt_dec_st *st, int16_t *sampv, size_t *sampc)
+static int decode(struct aufilt_dec_st *st, void *sampv, size_t *sampc)
 {
 	struct dec_st *dst = (struct dec_st *)st;
 	struct speex_st *sp = dst->st;
@@ -187,7 +203,6 @@ static int decode(struct aufilt_dec_st *st, int16_t *sampv, size_t *sampc)
 
 	return 0;
 }
-#endif
 
 
 static struct aufilt speex_aec = {
@@ -197,13 +212,9 @@ static struct aufilt speex_aec = {
 
 static int module_init(void)
 {
-	/* Note: Hack to check libspeex version */
-#ifdef SPEEX_SET_VBR_MAX_BITRATE
-	aufilt_register(&speex_aec);
+	aufilt_register(baresip_aufiltl(), &speex_aec);
+
 	return 0;
-#else
-	return ENOSYS;
-#endif
 }
 
 

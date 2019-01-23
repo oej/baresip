@@ -18,11 +18,10 @@ static void destructor(void *arg)
 
 	list_unlink(&st->le);
 	mem_deref(st->device);
-	mem_deref(st->vd);
 }
 
 
-int vidbridge_disp_alloc(struct vidisp_st **stp, struct vidisp *vd,
+int vidbridge_disp_alloc(struct vidisp_st **stp, const struct vidisp *vd,
 			 struct vidisp_prm *prm, const char *dev,
 			 vidisp_resize_h *resizeh, void *arg)
 {
@@ -39,7 +38,7 @@ int vidbridge_disp_alloc(struct vidisp_st **stp, struct vidisp *vd,
 	if (!st)
 		return ENOMEM;
 
-	st->vd = mem_ref(vd);
+	st->vd = vd;
 
 	err = str_dup(&st->device, dev);
 	if (err)
@@ -72,13 +71,13 @@ static bool list_apply_handler(struct le *le, void *arg)
 
 
 int vidbridge_disp_display(struct vidisp_st *st, const char *title,
-			   const struct vidframe *frame)
+			   const struct vidframe *frame, uint64_t timestamp)
 {
 	int err = 0;
 	(void)title;
 
 	if (st->vidsrc)
-		vidbridge_src_input(st->vidsrc, frame);
+		vidbridge_src_input(st->vidsrc, frame, timestamp);
 	else {
 		debug("vidbridge: display: dropping frame (%u x %u)\n",
 		      frame->size.w, frame->size.h);

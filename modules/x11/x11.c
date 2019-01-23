@@ -16,9 +16,25 @@
 #include <rem.h>
 #include <baresip.h>
 
+/*
+ * DO_REDIRECT has this program handle all of the window manager operations
+ *  and displays a borderless window.  That window does not take keyboard
+ *  focus - which means the keyboard input to baresip continues.  Clicking
+ *  on the window allows one to drag the window around.
+ * Blewett
+ */
+#define DO_REDIRECT 1
+
+
+/**
+ * @defgroup x11 x11
+ *
+ * X11 video-display module
+ */
+
 
 struct vidisp_st {
-	struct vidisp *vd;              /**< Inheritance (1st)     */
+	const struct vidisp *vd;        /**< Inheritance (1st)     */
 	struct vidsz size;              /**< Current size          */
 
 	Display *disp;
@@ -29,6 +45,9 @@ struct vidisp_st {
 	bool xshmat;
 	bool internal;
 	enum vidfmt pixfmt;
+	Atom XwinDeleted;
+	int button_is_down;
+	Time last_time;
 };
 
 
@@ -52,6 +71,37 @@ static int error_handler(Display *d, XErrorEvent *e)
 }
 
 
+static void close_window(struct vidisp_st *st)
+{
+	if (st->gc && st->disp) {
+		XFreeGC(st->disp, st->gc);
+		st->gc = NULL;
+	}
+
+	if (st->xshmat && st->disp) {
+		XShmDetach(st->disp, &st->shm);
+	}
+
+	if (st->shm.shmaddr != (char *)-1) {
+		shmdt(st->shm.shmaddr);
+		st->shm.shmaddr = (char *)-1;
+	}
+
+	if (st->shm.shmid >= 0)
+		shmctl(st->shm.shmid, IPC_RMID, NULL);
+
+	if (st->disp) {
+		if (st->internal && st->win) {
+			XDestroyWindow(st->disp, st->win);
+			st->win = 0;
+		}
+
+		XCloseDisplay(st->disp);
+		st->disp = NULL;
+	}
+}
+
+
 static void destructor(void *arg)
 {
 	struct vidisp_st *st = arg;
@@ -61,31 +111,15 @@ static void destructor(void *arg)
 		XDestroyImage(st->image);
 	}
 
-	if (st->gc)
-		XFreeGC(st->disp, st->gc);
-
-	if (st->xshmat)
-		XShmDetach(st->disp, &st->shm);
-
-	if (st->shm.shmaddr != (char *)-1)
-		shmdt(st->shm.shmaddr);
-
-	if (st->shm.shmid >= 0)
-		shmctl(st->shm.shmid, IPC_RMID, NULL);
-
-	if (st->disp) {
-		if (st->internal && st->win)
-			XDestroyWindow(st->disp, st->win);
-
-		XCloseDisplay(st->disp);
-	}
-
-	mem_deref(st->vd);
+	close_window(st);
 }
 
 
 static int create_window(struct vidisp_st *st, const struct vidsz *sz)
 {
+#ifdef DO_REDIRECT
+	XSetWindowAttributes attr;
+#endif
 	st->win = XCreateSimpleWindow(st->disp, DefaultRootWindow(st->disp),
 				      0, 0, sz->w, sz->h, 1, 0, 0);
 	if (!st->win) {
@@ -93,8 +127,28 @@ static int create_window(struct vidisp_st *st, const struct vidsz *sz)
 		return ENOMEM;
 	}
 
+#ifdef DO_REDIRECT
+	/*
+	 * set override rediect to avoid the "kill window" button
+	 *  we need to set masks to allow for mouse tracking, etc.
+	 *  to control the window - making us the window manager
+	 */
+	attr.override_redirect = true;
+	attr.event_mask = SubstructureRedirectMask |
+	    ButtonPressMask | ButtonReleaseMask |
+	    PointerMotionMask | Button1MotionMask;
+
+	XChangeWindowAttributes(st->disp, st->win,
+				CWOverrideRedirect | CWEventMask , &attr);
+#endif
 	XClearWindow(st->disp, st->win);
 	XMapRaised(st->disp, st->win);
+
+	/*
+	 * setup to catch window deletion
+	 */
+	st->XwinDeleted = XInternAtom(st->disp, "WM_DELETE_WINDOW", True);
+	XSetWMProtocols(st->disp, st->win, &st->XwinDeleted, 1);
 
 	return 0;
 }
@@ -106,6 +160,7 @@ static int x11_reset(struct vidisp_st *st, const struct vidsz *sz)
 	XGCValues gcv;
 	size_t bufsz, pixsz;
 	int err = 0;
+	bool try_shm;
 
 	if (!XGetWindowAttributes(st->disp, st->win, &attrs)) {
 		warning("x11: cant't get window attributes\n");
@@ -167,9 +222,17 @@ static int x11_reset(struct vidisp_st *st, const struct vidsz *sz)
 	x11.shm_error = 0;
 	x11.errorh = XSetErrorHandler(error_handler);
 
-	if (!XShmAttach(st->disp, &st->shm)) {
-		warning("x11: failed to attach X to shared memory\n");
-		return ENOMEM;
+	try_shm = XShmQueryExtension(st->disp);
+	if (try_shm) {
+
+		if (!XShmAttach(st->disp, &st->shm)) {
+			warning("x11: failed to attach X to shared memory\n");
+			return ENOMEM;
+		}
+	}
+	else {
+		info("x11: no shm extension\n");
+		x11.shm_error = 1;
 	}
 
 	XSync(st->disp, False);
@@ -177,8 +240,10 @@ static int x11_reset(struct vidisp_st *st, const struct vidsz *sz)
 
 	if (x11.shm_error)
 		info("x11: shared memory disabled\n");
-	else
+	else {
+		info("x11: shared memory enabled\n");
 		st->xshmat = true;
+	}
 
 	gcv.graphics_exposures = false;
 
@@ -215,7 +280,7 @@ static int x11_reset(struct vidisp_st *st, const struct vidsz *sz)
 
 
 /* prm->view points to the XWINDOW ID */
-static int alloc(struct vidisp_st **stp, struct vidisp *vd,
+static int alloc(struct vidisp_st **stp, const struct vidisp *vd,
 		 struct vidisp_prm *prm, const char *dev,
 		 vidisp_resize_h *resizeh, void *arg)
 {
@@ -229,7 +294,7 @@ static int alloc(struct vidisp_st **stp, struct vidisp *vd,
 	if (!st)
 		return ENOMEM;
 
-	st->vd = mem_ref(vd);
+	st->vd = vd;
 	st->shm.shmaddr = (char *)-1;
 
 	st->disp = XOpenDisplay(NULL);
@@ -256,10 +321,66 @@ static int alloc(struct vidisp_st **stp, struct vidisp *vd,
 
 
 static int display(struct vidisp_st *st, const char *title,
-		   const struct vidframe *frame)
+		   const struct vidframe *frame, uint64_t timestamp)
 {
 	struct vidframe frame_rgb;
 	int err = 0;
+	(void)timestamp;
+
+	if (!st->disp)
+		return ENODEV;
+
+	/*
+	 * check for window delete - without blocking
+	 *  the switch handles both the override redirect window
+	 *  and the "standard" window manager managed window.
+	 */
+	while (XPending(st->disp)) {
+
+		XEvent e;
+
+		XNextEvent(st->disp, &e);
+
+		switch (e.type) {
+
+		case ClientMessage:
+			if ((Atom) e.xclient.data.l[0] == st->XwinDeleted) {
+
+				info("x11: window deleted\n");
+
+				/*
+				 * we have to bail as all of the display
+				 * pointers are bad.
+				 */
+				close_window(st);
+				return ENODEV;
+			}
+			break;
+
+		case ButtonPress:
+			st->button_is_down = 1;
+			break;
+
+		case ButtonRelease:
+			st->button_is_down = 0;
+			break;
+
+		case MotionNotify:
+			if (st->button_is_down == 0)
+				break;
+			if ((e.xmotion.time - st->last_time) < 32)
+				break;
+
+			XMoveWindow(st->disp, st->win,
+				    e.xmotion.x_root - 16,
+				    e.xmotion.y_root - 16);
+			st->last_time = e.xmotion.time;
+			break;
+
+		default:
+			break;
+		}
+	}
 
 	if (!vidsz_cmp(&st->size, &frame->size)) {
 		char capt[256];
@@ -322,7 +443,8 @@ static void hide(struct vidisp_st *st)
 
 static int module_init(void)
 {
-	return vidisp_register(&vid, "x11", alloc, NULL, display, hide);
+	return vidisp_register(&vid, baresip_vidispl(),
+			       "x11", alloc, NULL, display, hide);
 }
 
 

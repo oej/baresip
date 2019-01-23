@@ -10,12 +10,28 @@
 #include "png_vf.h"
 
 
+/**
+ * @defgroup snapshot snapshot
+ *
+ * Take snapshot of the video stream and save it as PNG-files
+ *
+ *
+ * Commands:
+ *
+ \verbatim
+ snapshot       Take video snapshot
+ \endverbatim
+ */
+
+
 static bool flag_enc, flag_dec;
 
 
-static int encode(struct vidfilt_enc_st *st, struct vidframe *frame)
+static int encode(struct vidfilt_enc_st *st, struct vidframe *frame,
+		  uint64_t *timestamp)
 {
 	(void)st;
+	(void)timestamp;
 
 	if (!frame)
 		return 0;
@@ -29,9 +45,11 @@ static int encode(struct vidfilt_enc_st *st, struct vidframe *frame)
 }
 
 
-static int decode(struct vidfilt_dec_st *st, struct vidframe *frame)
+static int decode(struct vidfilt_dec_st *st, struct vidframe *frame,
+		  uint64_t *timestamp)
 {
 	(void)st;
+	(void)timestamp;
 
 	if (!frame)
 		return 0;
@@ -63,21 +81,21 @@ static struct vidfilt snapshot = {
 
 
 static const struct cmd cmdv[] = {
-	{'o', 0, "Take video snapshot", do_snapshot },
+	{"snapshot", 0, 0, "Take video snapshot", do_snapshot },
 };
 
 
 static int module_init(void)
 {
-	vidfilt_register(&snapshot);
-	return cmd_register(cmdv, ARRAY_SIZE(cmdv));
+	vidfilt_register(baresip_vidfiltl(), &snapshot);
+	return cmd_register(baresip_commands(), cmdv, ARRAY_SIZE(cmdv));
 }
 
 
 static int module_close(void)
 {
 	vidfilt_unregister(&snapshot);
-	cmd_unregister(cmdv);
+	cmd_unregister(baresip_commands(), cmdv);
 	return 0;
 }
 

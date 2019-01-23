@@ -5,10 +5,17 @@
  */
 #include <string.h>
 #include <stdlib.h>
-#include <speex/speex.h>
 #include <speex/speex_preprocess.h>
 #include <re.h>
+#include <rem.h>
 #include <baresip.h>
+
+
+/**
+ * @defgroup speex_pp speex_pp
+ *
+ * Audio pre-processor from libspeexdsp
+ */
 
 
 struct preproc {
@@ -45,14 +52,22 @@ static void speexpp_destructor(void *arg)
 
 
 static int encode_update(struct aufilt_enc_st **stp, void **ctx,
-			 const struct aufilt *af, struct aufilt_prm *prm)
+			 const struct aufilt *af, struct aufilt_prm *prm,
+			 const struct audio *au)
 {
 	struct preproc *st;
 	unsigned sampc;
 	(void)ctx;
+	(void)au;
 
-	if (!stp || !af || !prm || prm->ch != 1)
+	if (!stp || !af || !prm)
 		return EINVAL;
+
+	if (prm->fmt != AUFMT_S16LE) {
+		warning("speex_pp: unsupported sample format (%s)\n",
+			aufmt_name(prm->fmt));
+		return ENOTSUP;
+	}
 
 	st = mem_zalloc(sizeof(*st), speexpp_destructor);
 	if (!st)
@@ -94,25 +109,14 @@ static int encode_update(struct aufilt_enc_st **stp, void **ctx,
 }
 
 
-static int encode(struct aufilt_enc_st *st, int16_t *sampv, size_t *sampc)
+static int encode(struct aufilt_enc_st *st, void *sampv, size_t *sampc)
 {
 	struct preproc *pp = (struct preproc *)st;
-	int is_speech = 1;
 
 	if (!*sampc)
 		return 0;
 
-	/* NOTE: Using this macro to check libspeex version */
-#ifdef SPEEX_PREPROCESS_SET_NOISE_SUPPRESS
-	/* New API */
-	is_speech = speex_preprocess_run(pp->state, sampv);
-#else
-	/* Old API - not tested! */
-	is_speech = speex_preprocess(pp->state, sampv, NULL);
-#endif
-
-	/* XXX: Handle is_speech and VAD */
-	(void)is_speech;
+	speex_preprocess_run(pp->state, sampv);
 
 	return 0;
 }
@@ -134,7 +138,7 @@ static struct aufilt preproc = {
 static int module_init(void)
 {
 	config_parse(conf_cur());
-	aufilt_register(&preproc);
+	aufilt_register(baresip_aufiltl(), &preproc);
 	return 0;
 }
 

@@ -16,10 +16,11 @@ struct videnc_state {
 	struct vidsz size;
 	x265_param *param;
 	x265_encoder *x265;
-	int64_t pts;
-	unsigned fps;
+	double fps;
 	unsigned bitrate;
 	unsigned pktsize;
+	videnc_packet_h *pkth;
+	void *arg;
 };
 
 
@@ -34,7 +35,7 @@ static void destructor(void *arg)
 }
 
 
-static int set_params(struct videnc_state *st, unsigned fps, unsigned bitrate)
+static int set_params(struct videnc_state *st, double fps, unsigned bitrate)
 {
 	st->param = x265_param_alloc();
 	if (!st->param) {
@@ -63,7 +64,7 @@ static int set_params(struct videnc_state *st, unsigned fps, unsigned bitrate)
 	st->param->bRepeatHeaders = 1;
 
 	/* Rate Control */
-	st->param->rc.rateControlMode = X265_RC_CRF;
+	st->param->rc.rateControlMode = X265_RC_ABR;
 	st->param->rc.bitrate = bitrate / 1000;
 	st->param->rc.vbvMaxBitrate = bitrate / 1000;
 	st->param->rc.vbvBufferSize = 2 * bitrate / fps;
@@ -73,13 +74,14 @@ static int set_params(struct videnc_state *st, unsigned fps, unsigned bitrate)
 
 
 int h265_encode_update(struct videnc_state **vesp, const struct vidcodec *vc,
-		       struct videnc_param *prm, const char *fmtp)
+		       struct videnc_param *prm, const char *fmtp,
+		       videnc_packet_h *pkth, void *arg)
 {
 	struct videnc_state *ves;
 	int err = 0;
 	(void)fmtp;
 
-	if (!vesp || !vc || !prm || prm->pktsize < 3)
+	if (!vesp || !vc || !prm || prm->pktsize < 3 || !pkth)
 		return EINVAL;
 
 	ves = *vesp;
@@ -105,6 +107,8 @@ int h265_encode_update(struct videnc_state **vesp, const struct vidcodec *vc,
 	ves->bitrate = prm->bitrate;
 	ves->pktsize = prm->pktsize;
 	ves->fps     = prm->fps;
+	ves->pkth    = pkth;
+	ves->arg     = arg;
 
 	err = set_params(ves, prm->fps, prm->bitrate);
 	if (err)
@@ -135,12 +139,13 @@ static int open_encoder(struct videnc_state *st, const struct vidsz *size)
 
 
 static inline int packetize(bool marker, const uint8_t *buf, size_t len,
-			    size_t maxlen, videnc_packet_h *pkth, void *arg)
+			    size_t maxlen, uint64_t rtp_ts,
+			    videnc_packet_h *pkth, void *arg)
 {
 	int err = 0;
 
 	if (len <= maxlen) {
-		err = pkth(marker, NULL, 0, buf, len, arg);
+		err = pkth(marker, rtp_ts, NULL, 0, buf, len, arg);
 	}
 	else {
 		struct h265_nal nal;
@@ -148,6 +153,11 @@ static inline int packetize(bool marker, const uint8_t *buf, size_t len,
 		const size_t flen = maxlen - sizeof(fu_hdr);
 
 		err = h265_nal_decode(&nal, buf);
+		if (err) {
+			warning("h265: encode: could not decode"
+				" NAL of %zu bytes (%m)\n", len, err);
+			return err;
+		}
 
 		h265_nal_encode(fu_hdr, H265_NAL_FU,
 				nal.nuh_temporal_id_plus1);
@@ -158,7 +168,8 @@ static inline int packetize(bool marker, const uint8_t *buf, size_t len,
 		len-=2;
 
 		while (len > flen) {
-			err |= pkth(false, fu_hdr, 3, buf, flen, arg);
+			err |= pkth(false, rtp_ts, fu_hdr, 3, buf, flen,
+				    arg);
 
 			buf += flen;
 			len -= flen;
@@ -167,7 +178,8 @@ static inline int packetize(bool marker, const uint8_t *buf, size_t len,
 
 		fu_hdr[2] |= 1<<6;  /* set END bit */
 
-		err |= pkth(marker, fu_hdr, 3, buf, len, arg);
+		err |= pkth(marker, rtp_ts, fu_hdr, 3, buf, len,
+			    arg);
 	}
 
 	return err;
@@ -175,18 +187,41 @@ static inline int packetize(bool marker, const uint8_t *buf, size_t len,
 
 
 int h265_encode(struct videnc_state *st, bool update,
-		const struct vidframe *frame,
-		videnc_packet_h *pkth, void *arg)
+		const struct vidframe *frame, uint64_t timestamp)
 {
 	x265_picture *pic_in = NULL, pic_out;
 	x265_nal *nalv;
 	uint32_t i, nalc = 0;
+	int colorspace;
 	int n, err = 0;
+	uint64_t ts;
 
-	if (!st || !frame || !pkth || frame->fmt != VID_FMT_YUV420P)
+	if (!st || !frame)
 		return EINVAL;
 
-	if (!st->x265 || !vidsz_cmp(&st->size, &frame->size)) {
+	switch (frame->fmt) {
+
+	case VID_FMT_YUV420P:
+		colorspace = X265_CSP_I420;
+		break;
+
+	case VID_FMT_YUV444P:
+		colorspace = X265_CSP_I444;
+		break;
+
+	default:
+		warning("h265: encode: pixel format not supported (%s)\n",
+			vidfmt_name(frame->fmt));
+		return EINVAL;
+	}
+
+	if (!st->x265 || !vidsz_cmp(&st->size, &frame->size) ||
+	    st->param->internalCsp != colorspace) {
+
+		debug("h265: encoder: reset %u x %u (%s)\n",
+		      frame->size.w, frame->size.h, vidfmt_name(frame->fmt));
+
+		st->param->internalCsp = colorspace;
 
 		err = open_encoder(st, &frame->size);
 		if (err)
@@ -208,8 +243,8 @@ int h265_encode(struct videnc_state *st, bool update,
 	x265_picture_init(st->param, pic_in);
 
 	pic_in->sliceType  = update ? X265_TYPE_IDR : X265_TYPE_AUTO;
-	pic_in->pts        = ++st->pts;      /* XXX: add PTS to API */
-	pic_in->colorSpace = X265_CSP_I420;
+	pic_in->pts        = timestamp;
+	pic_in->colorSpace = colorspace;
 
 	for (i=0; i<3; i++) {
 		pic_in->planes[i] = frame->data[i];
@@ -221,6 +256,8 @@ int h265_encode(struct videnc_state *st, bool update,
 	if (n <= 0)
 		goto out;
 
+	ts = video_calc_rtp_timestamp_fix(pic_out.pts);
+
 	for (i=0; i<nalc; i++) {
 
 		x265_nal *nal = &nalv[i];
@@ -228,7 +265,7 @@ int h265_encode(struct videnc_state *st, bool update,
 		size_t len = nal->sizeBytes;
 		bool marker;
 
-#if 1
+#if 0
 		debug("h265: encode: %s type=%2d  %s\n",
 			  h265_is_keyframe(nal->type) ? "<KEY>" : "     ",
 			  nal->type, h265_nalunit_name(nal->type));
@@ -236,11 +273,10 @@ int h265_encode(struct videnc_state *st, bool update,
 
 		h265_skip_startcode(&p, &len);
 
-		/* XXX: use pic_out.pts */
-
 		marker = (i+1)==nalc;  /* last NAL */
 
-		err = packetize(marker, p, len, st->pktsize, pkth, arg);
+		err = packetize(marker, p, len, st->pktsize,
+				ts, st->pkth, st->arg);
 		if (err)
 			goto out;
 	}

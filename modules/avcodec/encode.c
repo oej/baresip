@@ -8,11 +8,17 @@
 #include <baresip.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/mem.h>
+#include <libavutil/opt.h>
 #ifdef USE_X264
 #include <x264.h>
 #endif
 #include "h26x.h"
 #include "avcodec.h"
+
+
+#ifndef AV_INPUT_BUFFER_MIN_SIZE
+#define AV_INPUT_BUFFER_MIN_SIZE FF_MIN_BUFFER_SIZE
+#endif
 
 
 enum {
@@ -32,11 +38,12 @@ struct videnc_state {
 	AVFrame *pict;
 	struct mbuf *mb;
 	size_t sz_max; /* todo: figure out proper buffer size */
-	int64_t pts;
 	struct mbuf *mb_frag;
 	struct videnc_param encprm;
 	struct vidsz encsize;
 	enum AVCodecID codec_id;
+	videnc_packet_h *pkth;
+	void *arg;
 
 	union {
 		struct {
@@ -75,6 +82,9 @@ static void destructor(void *arg)
 	if (st->ctx) {
 		if (st->ctx->codec)
 			avcodec_close(st->ctx);
+#if LIBAVUTIL_VERSION_INT >= ((51<<16)+(8<<8)+0)
+		av_opt_free(st->ctx);
+#endif
 		av_free(st->ctx);
 	}
 
@@ -125,6 +135,23 @@ static int decode_sdpparam_h263(struct videnc_state *st, const struct pl *name,
 
 static int init_encoder(struct videnc_state *st)
 {
+	/*
+	 * Special handling of H.264 encoder
+	 */
+	if (st->codec_id == AV_CODEC_ID_H264 && avcodec_h264enc) {
+
+#ifdef USE_X264
+		warning("avcodec: h264enc specified, but using libx264\n");
+		return EINVAL;
+#else
+		st->codec = avcodec_h264enc;
+
+		info("avcodec: h264 encoder activated\n");
+
+		return 0;
+#endif
+	}
+
 	st->codec = avcodec_find_encoder(st->codec_id);
 	if (!st->codec)
 		return ENOENT;
@@ -135,24 +162,24 @@ static int init_encoder(struct videnc_state *st)
 
 static int open_encoder(struct videnc_state *st,
 			const struct videnc_param *prm,
-			const struct vidsz *size)
+			const struct vidsz *size,
+			int pix_fmt)
 {
 	int err = 0;
 
 	if (st->ctx) {
 		if (st->ctx->codec)
 			avcodec_close(st->ctx);
+#if LIBAVUTIL_VERSION_INT >= ((51<<16)+(8<<8)+0)
+		av_opt_free(st->ctx);
+#endif
 		av_free(st->ctx);
 	}
 
 	if (st->pict)
 		av_free(st->pict);
 
-#if LIBAVCODEC_VERSION_INT >= ((52<<16)+(92<<8)+0)
 	st->ctx = avcodec_alloc_context3(st->codec);
-#else
-	st->ctx = avcodec_alloc_context();
-#endif
 
 #if LIBAVUTIL_VERSION_INT >= ((52<<16)+(20<<8)+100)
 	st->pict = av_frame_alloc();
@@ -165,40 +192,75 @@ static int open_encoder(struct videnc_state *st,
 		goto out;
 	}
 
+	av_opt_set_defaults(st->ctx);
+
 	st->ctx->bit_rate  = prm->bitrate;
 	st->ctx->width     = size->w;
 	st->ctx->height    = size->h;
 	st->ctx->gop_size  = DEFAULT_GOP_SIZE;
-	st->ctx->pix_fmt   = PIX_FMT_YUV420P;
+	st->ctx->pix_fmt   = pix_fmt;
 	st->ctx->time_base.num = 1;
 	st->ctx->time_base.den = prm->fps;
 
 	/* params to avoid libavcodec/x264 default preset error */
 	if (st->codec_id == AV_CODEC_ID_H264) {
-		st->ctx->me_method = ME_UMH;
+
+		av_opt_set(st->ctx->priv_data, "profile", "baseline", 0);
+
 		st->ctx->me_range = 16;
 		st->ctx->qmin = 10;
 		st->ctx->qmax = 51;
 		st->ctx->max_qdiff = 4;
+
+#ifndef USE_X264
+		if (st->codec == avcodec_find_encoder_by_name("nvenc_h264") ||
+		st->codec == avcodec_find_encoder_by_name("h264_nvenc")) {
+
+#if LIBAVUTIL_VERSION_INT >= ((51<<16)+(21<<8)+0)
+			err = av_opt_set(st->ctx->priv_data,
+				"preset", "llhp", 0);
+
+			if (err < 0) {
+				debug("avcodec: h264 nvenc setting preset "
+					"\"llhp\" failed; error: %u\n", err);
+			}
+			else {
+				debug("avcodec: h264 nvenc preset "
+					"\"llhp\" selected\n");
+			}
+			err = av_opt_set_int(st->ctx->priv_data,
+				"2pass", 1, 0);
+
+			if (err < 0) {
+				debug("avcodec: h264 nvenc option "
+					"\"2pass\" failed; error: %u\n", err);
+			}
+			else {
+				debug("avcodec: h264 nvenc option "
+					"\"2pass\" selected\n");
+			}
+#endif
+		}
+#endif
 	}
 
-#if LIBAVCODEC_VERSION_INT >= ((53<<16)+(8<<8)+0)
 	if (avcodec_open2(st->ctx, st->codec, NULL) < 0) {
 		err = ENOENT;
 		goto out;
 	}
-#else
-	if (avcodec_open(st->ctx, st->codec) < 0) {
-		err = ENOENT;
-		goto out;
-	}
-#endif
+
+	st->pict->format = pix_fmt;
+	st->pict->width = size->w;
+	st->pict->height = size->h;
 
  out:
 	if (err) {
 		if (st->ctx) {
 			if (st->ctx->codec)
 				avcodec_close(st->ctx);
+#if LIBAVUTIL_VERSION_INT >= ((51<<16)+(8<<8)+0)
+			av_opt_free(st->ctx);
+#endif
 			av_free(st->ctx);
 			st->ctx = NULL;
 		}
@@ -263,7 +325,7 @@ static void param_handler(const struct pl *name, const struct pl *val,
 }
 
 
-static int general_packetize(struct mbuf *mb, size_t pktsize,
+static int general_packetize(uint64_t rtp_ts, struct mbuf *mb, size_t pktsize,
 			     videnc_packet_h *pkth, void *arg)
 {
 	int err = 0;
@@ -277,7 +339,8 @@ static int general_packetize(struct mbuf *mb, size_t pktsize,
 
 		sz = last ? left : pktsize;
 
-		err = pkth(last, NULL, 0, mbuf_buf(mb), sz, arg);
+		err = pkth(last, rtp_ts, NULL, 0, mbuf_buf(mb), sz,
+			   arg);
 
 		mbuf_advance(mb, sz);
 	}
@@ -286,7 +349,8 @@ static int general_packetize(struct mbuf *mb, size_t pktsize,
 }
 
 
-static int h263_packetize(struct videnc_state *st, struct mbuf *mb,
+static int h263_packetize(struct videnc_state *st,
+			  uint64_t rtp_ts, struct mbuf *mb,
 			  videnc_packet_h *pkth, void *arg)
 {
 	struct h263_strm h263_strm;
@@ -321,7 +385,7 @@ static int h263_packetize(struct videnc_state *st, struct mbuf *mb,
 
 		st->mb_frag->pos = 0;
 
-		err = pkth(last, NULL, 0, mbuf_buf(st->mb_frag),
+		err = pkth(last, rtp_ts, NULL, 0, mbuf_buf(st->mb_frag),
 			   mbuf_get_left(st->mb_frag), arg);
 
 		mbuf_advance(mb, sz);
@@ -333,24 +397,23 @@ static int h263_packetize(struct videnc_state *st, struct mbuf *mb,
 
 #ifdef USE_X264
 static int open_encoder_x264(struct videnc_state *st, struct videnc_param *prm,
-			     const struct vidsz *size)
+			     const struct vidsz *size, int csp)
 {
 	x264_param_t xprm;
 
-	x264_param_default(&xprm);
+	if (x264_param_default_preset(&xprm, "ultrafast", "zerolatency"))
+		return ENOSYS;
 
-#if X264_BUILD >= 87
 	x264_param_apply_profile(&xprm, "baseline");
-#endif
 
 	xprm.i_level_idc = h264_level_idc;
 	xprm.i_width = size->w;
 	xprm.i_height = size->h;
-	xprm.i_csp = X264_CSP_I420;
+	xprm.i_csp = csp;
 	xprm.i_fps_num = prm->fps;
 	xprm.i_fps_den = 1;
 	xprm.rc.i_bitrate = prm->bitrate / 1000; /* kbit/s */
-	xprm.rc.i_rc_method = X264_RC_CQP;
+	xprm.rc.i_rc_method = X264_RC_ABR;
 	xprm.i_log_level = X264_LOG_WARNING;
 
 	/* ultrafast preset */
@@ -364,32 +427,22 @@ static int open_encoder_x264(struct videnc_state *st, struct videnc_param *prm,
 	xprm.analyse.b_transform_8x8 = 0;
 	xprm.analyse.i_me_method = X264_ME_DIA;
 	xprm.analyse.i_subpel_refine = 0;
-#if X264_BUILD >= 59
 	xprm.rc.i_aq_mode = 0;
-#endif
 	xprm.analyse.b_mixed_references = 0;
 	xprm.analyse.i_trellis = 0;
-#if X264_BUILD >= 63
 	xprm.i_bframe_adaptive = X264_B_ADAPT_NONE;
-#endif
-#if X264_BUILD >= 70
 	xprm.rc.b_mb_tree = 0;
-#endif
 
 	/* slice-based threading (--tune=zerolatency) */
-#if X264_BUILD >= 80
 	xprm.rc.i_lookahead = 0;
 	xprm.i_sync_lookahead = 0;
 	xprm.i_bframe = 0;
-#endif
 
 	/* put SPS/PPS before each keyframe */
 	xprm.b_repeat_headers = 1;
 
-#if X264_BUILD >= 82
 	/* needed for x264_encoder_intra_refresh() */
 	xprm.b_intra_refresh = 1;
-#endif
 
 	if (st->x264)
 		x264_encoder_close(st->x264);
@@ -408,12 +461,13 @@ static int open_encoder_x264(struct videnc_state *st, struct videnc_param *prm,
 
 
 int encode_update(struct videnc_state **vesp, const struct vidcodec *vc,
-		  struct videnc_param *prm, const char *fmtp)
+		  struct videnc_param *prm, const char *fmtp,
+		  videnc_packet_h *pkth, void *arg)
 {
 	struct videnc_state *st;
 	int err = 0;
 
-	if (!vesp || !vc || !prm)
+	if (!vesp || !vc || !prm || !pkth)
 		return EINVAL;
 
 	if (*vesp)
@@ -424,6 +478,8 @@ int encode_update(struct videnc_state **vesp, const struct vidcodec *vc,
 		return ENOMEM;
 
 	st->encprm = *prm;
+	st->pkth = pkth;
+	st->arg = arg;
 
 	st->codec_id = avcodec_resolve_codecid(vc->name);
 	if (st->codec_id == AV_CODEC_ID_NONE) {
@@ -431,7 +487,7 @@ int encode_update(struct videnc_state **vesp, const struct vidcodec *vc,
 		goto out;
 	}
 
-	st->mb  = mbuf_alloc(FF_MIN_BUFFER_SIZE * 20);
+	st->mb  = mbuf_alloc(AV_INPUT_BUFFER_MIN_SIZE * 20);
 	st->mb_frag = mbuf_alloc(1024);
 	if (!st->mb || !st->mb_frag) {
 		err = ENOMEM;
@@ -460,7 +516,7 @@ int encode_update(struct videnc_state **vesp, const struct vidcodec *vc,
 		fmt_param_apply(&sdp_fmtp, param_handler, st);
 	}
 
-	debug("avcodec: video encoder %s: %d fps, %d bit/s, pktsize=%u\n",
+	debug("avcodec: video encoder %s: %.2f fps, %d bit/s, pktsize=%u\n",
 	      vc->name, prm->fps, prm->bitrate, prm->pktsize);
 
  out:
@@ -475,54 +531,88 @@ int encode_update(struct videnc_state **vesp, const struct vidcodec *vc,
 
 #ifdef USE_X264
 int encode_x264(struct videnc_state *st, bool update,
-		const struct vidframe *frame,
-		videnc_packet_h *pkth, void *arg)
+		const struct vidframe *frame, uint64_t timestamp)
 {
 	x264_picture_t pic_in, pic_out;
 	x264_nal_t *nal;
 	int i_nal;
 	int i, err, ret;
+	int csp, pln;
+	int64_t input_pts;
+	uint64_t ts;
+
+	if (!st || !frame)
+		return EINVAL;
+
+	switch (frame->fmt) {
+
+	case VID_FMT_YUV420P:
+		csp = X264_CSP_I420;
+		pln = 3;
+		break;
+
+	case VID_FMT_NV12:
+		csp = X264_CSP_NV12;
+		pln = 2;
+		break;
+
+	case VID_FMT_YUV444P:
+		csp = X264_CSP_I444;
+		pln = 3;
+		break;
+
+	default:
+		warning("avcodec: pixel format not supported (%s)\n",
+			vidfmt_name(frame->fmt));
+		return ENOTSUP;
+	}
 
 	if (!st->x264 || !vidsz_cmp(&st->encsize, &frame->size)) {
 
-		err = open_encoder_x264(st, &st->encprm, &frame->size);
+		err = open_encoder_x264(st, &st->encprm, &frame->size, csp);
 		if (err)
 			return err;
 	}
 
 	if (update) {
-#if X264_BUILD >= 95
 		x264_encoder_intra_refresh(st->x264);
-#endif
 		debug("avcodec: x264 picture update\n");
 	}
 
 	x264_picture_init(&pic_in);
 
+	/*
+	 * We use the video source timestamp as PTS.
+	 * Since the PTS is in time_base units (derived from FPS) and
+	 * the input and output has the same units, this should work
+	 * fine, as long as the real FPS is less than the MAX FPS.
+	 */
+	input_pts = timestamp;
+
 	pic_in.i_type = update ? X264_TYPE_IDR : X264_TYPE_AUTO;
 	pic_in.i_qpplus1 = 0;
-	pic_in.i_pts = ++st->pts;
+	pic_in.i_pts = input_pts;
 
-	pic_in.img.i_csp = X264_CSP_I420;
-	pic_in.img.i_plane = 3;
-	for (i=0; i<3; i++) {
+	pic_in.img.i_csp = csp;
+	pic_in.img.i_plane = pln;
+	for (i=0; i<pln; i++) {
 		pic_in.img.i_stride[i] = frame->linesize[i];
 		pic_in.img.plane[i]    = frame->data[i];
 	}
 
 	ret = x264_encoder_encode(st->x264, &nal, &i_nal, &pic_in, &pic_out);
 	if (ret < 0) {
-		fprintf(stderr, "x264 [error]: x264_encoder_encode failed\n");
+		warning("avcodec: x264 [error]: x264_encoder_encode failed\n");
 	}
 	if (i_nal == 0)
 		return 0;
+
+	ts = video_calc_rtp_timestamp_fix(pic_out.i_pts);
 
 	err = 0;
 	for (i=0; i<i_nal && !err; i++) {
 		const uint8_t hdr = nal[i].i_ref_idc<<5 | nal[i].i_type<<0;
 		int offset = 0;
-
-#if X264_BUILD >= 76
 		const uint8_t *p = nal[i].p_payload;
 
 		/* Find the NAL Escape code [00 00 01] */
@@ -532,16 +622,16 @@ int encode_x264(struct videnc_state *st, bool update,
 			else if (p[2] == 0x01)
 				offset = 3 + 1;
 		}
-#endif
 
 		/* skip Supplemental Enhancement Information (SEI) */
 		if (nal[i].i_type == H264_NAL_SEI)
 			continue;
 
-		err = h264_nal_send(true, true, (i+1)==i_nal, hdr,
+		err = h264_nal_send(true, true, (i+1)==i_nal, hdr, ts,
 				    nal[i].p_payload + offset,
 				    nal[i].i_payload - offset,
-				    st->encprm.pktsize, pkth, arg);
+				    st->encprm.pktsize,
+				    st->pkth, st->arg);
 	}
 
 	return err;
@@ -550,16 +640,39 @@ int encode_x264(struct videnc_state *st, bool update,
 
 
 int encode(struct videnc_state *st, bool update, const struct vidframe *frame,
-	   videnc_packet_h *pkth, void *arg)
+	   uint64_t timestamp)
 {
 	int i, err, ret;
+	int pix_fmt;
+	int64_t pts;
+	uint64_t ts;
 
-	if (!st || !frame || !pkth || frame->fmt != VID_FMT_YUV420P)
+	if (!st || !frame)
 		return EINVAL;
+
+	switch (frame->fmt) {
+
+	case VID_FMT_YUV420P:
+		pix_fmt = AV_PIX_FMT_YUV420P;
+		break;
+
+	case VID_FMT_NV12:
+		pix_fmt = AV_PIX_FMT_NV12;
+		break;
+
+	case VID_FMT_YUV444P:
+		pix_fmt = AV_PIX_FMT_YUV444P;
+		break;
+
+	default:
+		warning("avcodec: pixel format not supported (%s)\n",
+			vidfmt_name(frame->fmt));
+		return ENOTSUP;
+	}
 
 	if (!st->ctx || !vidsz_cmp(&st->encsize, &frame->size)) {
 
-		err = open_encoder(st, &st->encprm, &frame->size);
+		err = open_encoder(st, &st->encprm, &frame->size, pix_fmt);
 		if (err) {
 			warning("avcodec: open_encoder: %m\n", err);
 			return err;
@@ -570,7 +683,7 @@ int encode(struct videnc_state *st, bool update, const struct vidframe *frame,
 		st->pict->data[i]     = frame->data[i];
 		st->pict->linesize[i] = frame->linesize[i];
 	}
-	st->pict->pts = st->pts++;
+	st->pict->pts = timestamp;
 	if (update) {
 		debug("avcodec: encoder picture update\n");
 		st->pict->key_frame = 1;
@@ -587,7 +700,35 @@ int encode(struct videnc_state *st, bool update, const struct vidframe *frame,
 
 	mbuf_rewind(st->mb);
 
-#if LIBAVCODEC_VERSION_INT >= ((54<<16)+(1<<8)+0)
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(57, 37, 100)
+	do {
+		AVPacket *pkt;
+
+		ret = avcodec_send_frame(st->ctx, st->pict);
+		if (ret < 0)
+			return EBADMSG;
+
+		pkt = av_packet_alloc();
+		if (!pkt)
+			return ENOMEM;
+
+		ret = avcodec_receive_packet(st->ctx, pkt);
+		if (ret < 0) {
+			av_packet_free(&pkt);
+			return 0;
+		}
+
+		pts = pkt->dts;
+
+		err = mbuf_write_mem(st->mb, pkt->data, pkt->size);
+		st->mb->pos = 0;
+
+		av_packet_free(&pkt);
+
+		if (err)
+			return err;
+	} while (0);
+#elif LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(54, 1, 0)
 	do {
 		AVPacket avpkt;
 		int got_packet;
@@ -606,6 +747,8 @@ int encode(struct videnc_state *st, bool update, const struct vidframe *frame,
 
 		mbuf_set_end(st->mb, avpkt.size);
 
+		pts = avpkt.dts;
+
 	} while (0);
 #else
 	ret = avcodec_encode_video(st->ctx, st->mb->buf,
@@ -621,20 +764,27 @@ int encode(struct videnc_state *st, bool update, const struct vidframe *frame,
 	}
 
 	mbuf_set_end(st->mb, ret);
+
+	pts = st->pict->pts;
 #endif
+
+	ts = video_calc_rtp_timestamp_fix(pts);
 
 	switch (st->codec_id) {
 
 	case AV_CODEC_ID_H263:
-		err = h263_packetize(st, st->mb, pkth, arg);
+		err = h263_packetize(st, ts, st->mb, st->pkth, st->arg);
 		break;
 
 	case AV_CODEC_ID_H264:
-		err = h264_packetize(st->mb, st->encprm.pktsize, pkth, arg);
+		err = h264_packetize(ts, st->mb->buf, st->mb->end,
+				     st->encprm.pktsize,
+				     st->pkth, st->arg);
 		break;
 
 	case AV_CODEC_ID_MPEG4:
-		err = general_packetize(st->mb, st->encprm.pktsize, pkth, arg);
+		err = general_packetize(ts, st->mb, st->encprm.pktsize,
+					st->pkth, st->arg);
 		break;
 
 	default:

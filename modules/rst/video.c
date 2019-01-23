@@ -3,7 +3,7 @@
  *
  * Copyright (C) 2011 Creytiv.com
  */
-
+#define _DEFAULT_SOURCE 1
 #define _BSD_SOURCE 1
 #include <pthread.h>
 #include <string.h>
@@ -15,7 +15,7 @@
 
 
 struct vidsrc_st {
-	struct vidsrc *vs;
+	const struct vidsrc *vs;  /* pointer to base-class (inheritance) */
 	pthread_mutex_t mutex;
 	pthread_t thread;
 	struct vidsrc_prm prm;
@@ -52,7 +52,6 @@ static void destructor(void *arg)
 		cairo_surface_destroy(st->surface);
 
 	mem_deref(st->frame);
-	mem_deref(st->vs);
 }
 
 
@@ -63,15 +62,19 @@ static void *video_thread(void *arg)
 
 	while (st->run) {
 
-		(void)usleep(4000);
+		uint64_t timestamp;
+
+		sys_msleep(4);
 
 		now = tmr_jiffies();
 
 		if (ts > now)
 			continue;
 
+		timestamp = ts * VIDEO_TIMEBASE / 1000;
+
 		pthread_mutex_lock(&st->mutex);
-		st->frameh(st->frame, st->arg);
+		st->frameh(st->frame, timestamp, st->arg);
 		pthread_mutex_unlock(&st->mutex);
 
 		ts += 1000/st->prm.fps;
@@ -188,7 +191,7 @@ void rst_video_update(struct vidsrc_st *st, const char *name, const char *meta)
 }
 
 
-static int alloc_handler(struct vidsrc_st **stp, struct vidsrc *vs,
+static int alloc_handler(struct vidsrc_st **stp, const struct vidsrc *vs,
 			 struct media_ctx **ctx, struct vidsrc_prm *prm,
 			 const struct vidsz *size, const char *fmt,
 			 const char *dev, vidsrc_frame_h *frameh,
@@ -211,7 +214,7 @@ static int alloc_handler(struct vidsrc_st **stp, struct vidsrc *vs,
 	if (err)
 		goto out;
 
-	st->vs     = mem_ref(vs);
+	st->vs     = vs;
 	st->prm    = *prm;
 	st->size   = *size;
 	st->frameh = frameh;
@@ -270,7 +273,8 @@ static int alloc_handler(struct vidsrc_st **stp, struct vidsrc *vs,
 
 int rst_video_init(void)
 {
-	return vidsrc_register(&vidsrc, "rst", alloc_handler, NULL);
+	return vidsrc_register(&vidsrc, baresip_vidsrcl(),
+			       "rst", alloc_handler, NULL);
 }
 
 

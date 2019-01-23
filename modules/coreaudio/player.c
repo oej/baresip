@@ -20,7 +20,7 @@
 
 
 struct auplay_st {
-	struct auplay *ap;      /* inheritance */
+	const struct auplay *ap;      /* inheritance */
 	AudioQueueRef queue;
 	AudioQueueBufferRef buf[BUFC];
 	pthread_mutex_t mutex;
@@ -51,8 +51,6 @@ static void auplay_destructor(void *arg)
 		AudioQueueDispose(st->queue, true);
 	}
 
-	mem_deref(st->ap);
-
 	pthread_mutex_destroy(&st->mutex);
 }
 
@@ -78,7 +76,7 @@ static void play_handler(void *userData, AudioQueueRef outQ,
 }
 
 
-int coreaudio_player_alloc(struct auplay_st **stp, struct auplay *ap,
+int coreaudio_player_alloc(struct auplay_st **stp, const struct auplay *ap,
 			   struct auplay_prm *prm, const char *device,
 			   auplay_write_h *wh, void *arg)
 {
@@ -88,13 +86,14 @@ int coreaudio_player_alloc(struct auplay_st **stp, struct auplay *ap,
 	OSStatus status;
 	int err;
 
-	(void)device;
+	if (!stp || !ap || !prm || prm->fmt != AUFMT_S16LE)
+		return EINVAL;
 
 	st = mem_zalloc(sizeof(*st), auplay_destructor);
 	if (!st)
 		return ENOMEM;
 
-	st->ap  = mem_ref(ap);
+	st->ap  = ap;
 	st->wh  = wh;
 	st->arg = arg;
 
@@ -125,6 +124,36 @@ int coreaudio_player_alloc(struct auplay_st **stp, struct auplay *ap,
 		warning("coreaudio: AudioQueueNewOutput error: %i\n", status);
 		err = ENODEV;
 		goto out;
+	}
+
+	if (str_isset(device) && 0 != str_casecmp(device, "default")) {
+
+		CFStringRef uid;
+
+		info("coreaudio: player: using device '%s'\n", device);
+
+		err = coreaudio_enum_devices(device, NULL, &uid, false);
+		if (err)
+			goto out;
+
+		if (!uid) {
+			warning("coreaudio: player: device not found: '%s'\n",
+				device);
+			err = ENODEV;
+			goto out;
+		}
+
+		status = AudioQueueSetProperty(st->queue,
+				       kAudioQueueProperty_CurrentDevice,
+				       &uid,
+				       sizeof(uid));
+		CFRelease(uid);
+		if (status) {
+			warning("coreaudio: player: failed to"
+				" set current device (%i)\n", status);
+			err = ENODEV;
+			goto out;
+		}
 	}
 
 	sampc = prm->srate * prm->ch * prm->ptime / 1000;
@@ -161,4 +190,15 @@ int coreaudio_player_alloc(struct auplay_st **stp, struct auplay *ap,
 		*stp = st;
 
 	return err;
+}
+
+
+int coreaudio_player_init(struct auplay *ap)
+{
+	if (!ap)
+		return EINVAL;
+
+	list_init(&ap->dev_list);
+
+	return coreaudio_enum_devices(NULL, &ap->dev_list, NULL, false);
 }

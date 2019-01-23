@@ -1,13 +1,40 @@
 /**
  * @file httpd.c Webserver UI module
  *
- * Copyright (C) 2010 Creytiv.com
+ * Copyright (C) 2010 - 2015 Creytiv.com
  */
 #include <re.h>
 #include <baresip.h>
 
 
+/**
+ * @defgroup httpd httpd
+ *
+ * HTTP Server module for the User-Interface
+ *
+ * Open your favourite web browser and point it to http://127.0.0.1:8000/
+ *
+ * Example URLs:
+ \verbatim
+  http://127.0.0.1:8000?h                  -- Print the Help menu
+  http://127.0.0.1:8000?d1234@target.com   -- Make an outgoing call
+ \endverbatim
+ */
+
+
 static struct http_sock *httpsock;
+
+
+static int handle_input(struct re_printf *pf, const struct pl *pl)
+{
+	if (!pl)
+		return 0;
+
+	if (pl->l > 1 && pl->p[0] == '/')
+		return ui_input_long_command(pf, pl);
+	else
+		return ui_input_pl(pf, pl);
+}
 
 
 static int html_print_head(struct re_printf *pf, void *unused)
@@ -22,16 +49,16 @@ static int html_print_head(struct re_printf *pf, void *unused)
 }
 
 
-static int html_print_cmd(struct re_printf *pf, const struct http_msg *req)
+static int html_print_cmd(struct re_printf *pf, const struct pl *prm)
 {
 	struct pl params;
 
-	if (!pf || !req)
+	if (!pf || !prm)
 		return EINVAL;
 
-	if (pl_isset(&req->prm)) {
-		params.p = req->prm.p + 1;
-		params.l = req->prm.l - 1;
+	if (pl_isset(prm)) {
+		params.p = prm->p + 1;
+		params.l = prm->l - 1;
 	}
 	else {
 		params.p = "h";
@@ -47,20 +74,20 @@ static int html_print_cmd(struct re_printf *pf, const struct http_msg *req)
 			  "</body>\n"
 			  "</html>\n",
 			  html_print_head, NULL,
-			  ui_input_pl, &params);
+			  handle_input, &params);
 }
 
 
-static int html_print_raw(struct re_printf *pf, const struct http_msg *req)
+static int html_print_raw(struct re_printf *pf, const struct pl *prm)
 {
 	struct pl params;
 
-	if (!pf || !req)
+	if (!pf || !prm)
 		return EINVAL;
 
-	if (pl_isset(&req->prm)) {
-		params.p = req->prm.p + 1;
-		params.l = req->prm.l - 1;
+	if (pl_isset(prm)) {
+		params.p = prm->p + 1;
+		params.l = prm->l - 1;
 	}
 	else {
 		params.p = "h";
@@ -69,29 +96,70 @@ static int html_print_raw(struct re_printf *pf, const struct http_msg *req)
 
 	return re_hprintf(pf,
 			  "%H",
-			  ui_input_pl, &params);
+			  handle_input, &params);
 }
 
 static void http_req_handler(struct http_conn *conn,
 			     const struct http_msg *msg, void *arg)
 {
+	struct mbuf *mb;
+	int err;
+	char *buf = NULL;
+	struct pl nprm;
 	(void)arg;
+
+	mb = mbuf_alloc(8192);
+	if (!mb)
+		return;
+
+	err = re_sdprintf(&buf, "%H", uri_header_unescape, &msg->prm);
+	if (err)
+		goto error;
+
+	pl_set_str(&nprm, buf);
 
 	if (0 == pl_strcasecmp(&msg->path, "/")) {
 
-		http_creply(conn, 200, "OK",
-			    "text/html;charset=UTF-8",
-			    "%H", html_print_cmd, msg);
+		err = mbuf_printf(mb, "%H", html_print_cmd, &nprm);
+		if (!err) {
+			http_reply(conn, 200, "OK",
+				 "Content-Type: text/html;charset=UTF-8\r\n"
+				 "Content-Length: %zu\r\n"
+				 "Access-Control-Allow-Origin: *\r\n"
+				 "\r\n"
+				 "%b",
+				 mb->end,
+				 mb->buf, mb->end);
+		}
+
 	}
 	else if (0 == pl_strcasecmp(&msg->path, "/raw/")) {
 
-		http_creply(conn, 200, "OK",
-			    "text/plain;charset=UTF-8",
-			    "%H", html_print_raw, msg);
+		err = mbuf_printf(mb, "%H", html_print_raw, &nprm);
+		if (!err) {
+			http_reply(conn, 200, "OK",
+				 "Content-Type: text/plain;charset=UTF-8\r\n"
+				 "Content-Length: %zu\r\n"
+				 "Access-Control-Allow-Origin: *\r\n"
+				 "\r\n"
+				 "%b",
+				 mb->end,
+				 mb->buf, mb->end);
+		}
+
 	}
 	else {
-		http_ereply(conn, 404, "Not Found");
+		goto error;
 	}
+	mem_deref(mb);
+	mem_deref(buf);
+
+	return;
+
+ error:
+	mem_deref(mb);
+	mem_deref(buf);
+	http_ereply(conn, 404, "Not Found");
 }
 
 
@@ -99,7 +167,7 @@ static int output_handler(const char *str)
 {
 	(void)str;
 
-	/* TODO: print 'str' to all active HTTP connections */
+	/* XXX: print 'str' to all active HTTP connections */
 
 	return 0;
 }
@@ -124,7 +192,7 @@ static int module_init(void)
 	if (err)
 		return err;
 
-	ui_register(&ui_http);
+	ui_register(baresip_uis(), &ui_http);
 
 	info("httpd: listening on %J\n", &laddr);
 

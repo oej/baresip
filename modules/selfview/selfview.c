@@ -9,6 +9,19 @@
 #include <baresip.h>
 
 
+/**
+ * @defgroup selfview selfview
+ *
+ * Show a selfview of the captured video stream
+ *
+ * Example config:
+ \verbatim
+  video_selfview          pip # {window,pip}
+  selfview_size           64x64
+ \endverbatim
+ */
+
+
 /* shared state */
 struct selfview {
 	struct lock *lock;          /**< Protect frame         */
@@ -139,7 +152,8 @@ static int decode_update(struct vidfilt_dec_st **stp, void **ctx,
 }
 
 
-static int encode_win(struct vidfilt_enc_st *st, struct vidframe *frame)
+static int encode_win(struct vidfilt_enc_st *st, struct vidframe *frame,
+		      uint64_t *timestamp)
 {
 	struct selfview_enc *enc = (struct selfview_enc *)st;
 	int err;
@@ -149,20 +163,23 @@ static int encode_win(struct vidfilt_enc_st *st, struct vidframe *frame)
 
 	if (!enc->disp) {
 
-		err = vidisp_alloc(&enc->disp, NULL, NULL, NULL, NULL, NULL);
+		err = vidisp_alloc(&enc->disp, baresip_vidispl(),
+				   NULL, NULL, NULL, NULL, NULL);
 		if (err)
 			return err;
 	}
 
-	return vidisp_display(enc->disp, "Selfview", frame);
+	return vidisp_display(enc->disp, "Selfview", frame, *timestamp);
 }
 
 
-static int encode_pip(struct vidfilt_enc_st *st, struct vidframe *frame)
+static int encode_pip(struct vidfilt_enc_st *st, struct vidframe *frame,
+		      uint64_t *timestamp)
 {
 	struct selfview_enc *enc = (struct selfview_enc *)st;
 	struct selfview *selfview = enc->selfview;
 	int err = 0;
+	(void)timestamp;
 
 	if (!frame)
 		return 0;
@@ -190,10 +207,12 @@ static int encode_pip(struct vidfilt_enc_st *st, struct vidframe *frame)
 }
 
 
-static int decode_pip(struct vidfilt_dec_st *st, struct vidframe *frame)
+static int decode_pip(struct vidfilt_dec_st *st, struct vidframe *frame,
+		      uint64_t *timestamp)
 {
 	struct selfview_dec *dec = (struct selfview_dec *)st;
 	struct selfview *sv = dec->selfview;
+	(void)timestamp;
 
 	if (!frame)
 		return 0;
@@ -235,15 +254,14 @@ static struct vidfilt selfview_pip = {
 
 static int module_init(void)
 {
-	struct pl pl;
+	struct pl pl = PL("pip");
 
-	if (conf_get(conf_cur(), "video_selfview", &pl))
-		return 0;
+	(void)conf_get(conf_cur(), "video_selfview", &pl);
 
 	if (0 == pl_strcasecmp(&pl, "window"))
-		vidfilt_register(&selfview_win);
+		vidfilt_register(baresip_vidfiltl(), &selfview_win);
 	else if (0 == pl_strcasecmp(&pl, "pip"))
-		vidfilt_register(&selfview_pip);
+		vidfilt_register(baresip_vidfiltl(), &selfview_pip);
 
 	(void)conf_get_vidsz(conf_cur(), "selfview_size", &selfview_size);
 

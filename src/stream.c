@@ -10,9 +10,75 @@
 #include "core.h"
 
 
+/** Magic number */
+#define MAGIC 0x00511ea3
+#include "magic.h"
+
+
 enum {
 	RTP_RECV_SIZE = 8192,
+	RTP_CHECK_INTERVAL = 1000  /* how often to check for RTP [ms] */
 };
+
+
+static void stream_close(struct stream *strm, int err)
+{
+	stream_error_h *errorh = strm->errorh;
+
+	strm->terminated = true;
+	strm->errorh = NULL;
+
+	if (errorh) {
+		errorh(strm, err, strm->errorh_arg);
+	}
+}
+
+
+static void check_rtp_handler(void *arg)
+{
+	struct stream *strm = arg;
+	const uint64_t now = tmr_jiffies();
+	int diff_ms;
+
+	MAGIC_CHECK(strm);
+
+	tmr_start(&strm->tmr_rtp, RTP_CHECK_INTERVAL,
+		  check_rtp_handler, strm);
+
+	/* If no RTP was received at all, check later */
+	if (!strm->ts_last)
+		return;
+
+	/* We are in sendrecv mode, check when the last RTP packet
+	 * was received.
+	 */
+	if (sdp_media_dir(strm->sdp) == SDP_SENDRECV) {
+
+		diff_ms = (int)(now - strm->ts_last);
+
+		debug("stream: last \"%s\" RTP packet: %d milliseconds\n",
+		      sdp_media_name(strm->sdp), diff_ms);
+
+		/* check for large jumps in time */
+		if (diff_ms > (3600 * 1000)) {
+			strm->ts_last = 0;
+			return;
+		}
+
+		if (diff_ms > (int)strm->rtp_timeout_ms) {
+
+			info("stream: no %s RTP packets received for"
+			     " %d milliseconds\n",
+			     sdp_media_name(strm->sdp), diff_ms);
+
+			stream_close(strm, ETIMEDOUT);
+		}
+	}
+	else {
+		re_printf("check_rtp: not checking (dir=%s)\n",
+			  sdp_dir_name(sdp_media_dir(strm->sdp)));
+	}
+}
 
 
 static inline int lostcalc(struct stream *s, uint16_t seq)
@@ -51,8 +117,8 @@ static void print_rtp_stats(const struct stream *s)
 	     ,
 	     sdp_media_name(s->sdp),
 	     s->metric_tx.n_packets, s->metric_rx.n_packets,
-	     1.0*metric_avg_bitrate(&s->metric_tx)/1000,
-	     1.0*metric_avg_bitrate(&s->metric_rx)/1000,
+	     1.0*metric_avg_bitrate(&s->metric_tx)/1000.0,
+	     1.0*metric_avg_bitrate(&s->metric_rx)/1000.0,
 	     s->metric_tx.n_err, s->metric_rx.n_err
 	     );
 
@@ -79,8 +145,8 @@ static void stream_destructor(void *arg)
 	metric_reset(&s->metric_tx);
 	metric_reset(&s->metric_rx);
 
+	tmr_cancel(&s->tmr_rtp);
 	list_unlink(&s->le);
-	mem_deref(s->rtpkeep);
 	mem_deref(s->sdp);
 	mem_deref(s->mes);
 	mem_deref(s->mencs);
@@ -91,12 +157,70 @@ static void stream_destructor(void *arg)
 }
 
 
-static void rtp_recv(const struct sa *src, const struct rtp_header *hdr,
-		     struct mbuf *mb, void *arg)
+static void handle_rtp(struct stream *s, const struct rtp_header *hdr,
+		       struct mbuf *mb)
+{
+	struct rtpext extv[8];
+	size_t extc = 0;
+
+	/* RFC 5285 -- A General Mechanism for RTP Header Extensions */
+	if (hdr->ext && hdr->x.len && mb) {
+
+		const size_t pos = mb->pos;
+		const size_t end = mb->end;
+		const size_t ext_stop = mb->pos;
+		size_t ext_len;
+		size_t i;
+		int err;
+
+		if (hdr->x.type != RTPEXT_TYPE_MAGIC) {
+			info("stream: unknown ext type ignored (0x%04x)\n",
+			     hdr->x.type);
+			goto handler;
+		}
+
+		ext_len = hdr->x.len*sizeof(uint32_t);
+		if (mb->pos < ext_len) {
+			warning("stream: corrupt rtp packet,"
+				" not enough space for rtpext of %zu bytes\n",
+				ext_len);
+			return;
+		}
+
+		mb->pos = mb->pos - ext_len;
+		mb->end = ext_stop;
+
+		for (i=0; i<ARRAY_SIZE(extv) && mbuf_get_left(mb); i++) {
+
+			err = rtpext_decode(&extv[i], mb);
+			if (err) {
+				warning("stream: rtpext_decode failed (%m)\n",
+					err);
+				return;
+			}
+		}
+
+		extc = i;
+
+		mb->pos = pos;
+		mb->end = end;
+	}
+
+ handler:
+	s->rtph(hdr, extv, extc, mb, s->arg);
+}
+
+
+static void rtp_handler(const struct sa *src, const struct rtp_header *hdr,
+			struct mbuf *mb, void *arg)
 {
 	struct stream *s = arg;
 	bool flush = false;
 	int err;
+
+	MAGIC_CHECK(s);
+
+	s->ts_last = tmr_jiffies();
 
 	if (!mbuf_get_left(mb))
 		return;
@@ -105,6 +229,13 @@ static void rtp_recv(const struct sa *src, const struct rtp_header *hdr,
 		return;
 
 	metric_add_packet(&s->metric_rx, mbuf_get_left(mb));
+
+	if (!s->rtp_estab) {
+		info("stream: incoming rtp for '%s' established"
+		     ", receiving from %J\n",
+		     sdp_media_name(s->sdp), src);
+		s->rtp_estab = true;
+	}
 
 	if (hdr->ssrc != s->ssrc_rx) {
 		if (s->ssrc_rx) {
@@ -145,17 +276,17 @@ static void rtp_recv(const struct sa *src, const struct rtp_header *hdr,
 		s->jbuf_started = true;
 
 		if (lostcalc(s, hdr2.seq) > 0)
-			s->rtph(hdr, NULL, s->arg);
+			handle_rtp(s, hdr, NULL);
 
-		s->rtph(&hdr2, mb2, s->arg);
+		handle_rtp(s, &hdr2, mb2);
 
 		mem_deref(mb2);
 	}
 	else {
 		if (lostcalc(s, hdr->seq) > 0)
-			s->rtph(hdr, NULL, s->arg);
+			handle_rtp(s, hdr, NULL);
 
-		s->rtph(hdr, mb, s->arg);
+		handle_rtp(s, hdr, mb);
 	}
 }
 
@@ -164,6 +295,10 @@ static void rtcp_handler(const struct sa *src, struct rtcp_msg *msg, void *arg)
 {
 	struct stream *s = arg;
 	(void)src;
+
+	MAGIC_CHECK(s);
+
+	s->ts_last = tmr_jiffies();
 
 	if (s->rtcph)
 		s->rtcph(msg, s->arg);
@@ -176,6 +311,8 @@ static void rtcp_handler(const struct sa *src, struct rtcp_msg *msg, void *arg)
 		if (s->cfg.rtp_stats)
 			call_set_xrtpstat(s->call);
 
+		ua_event(call_get_ua(s->call), UA_EVENT_CALL_RTCP, s->call,
+			 "%s", sdp_media_name(stream_sdpmedia(s)));
 		break;
 	}
 }
@@ -194,9 +331,13 @@ static int stream_sock_alloc(struct stream *s, int af)
 
 	err = rtp_listen(&s->rtp, IPPROTO_UDP, &laddr,
 			 s->cfg.rtp_ports.min, s->cfg.rtp_ports.max,
-			 s->rtcp, rtp_recv, rtcp_handler, s);
-	if (err)
+			 true, rtp_handler, rtcp_handler, s);
+	if (err) {
+		warning("stream: rtp_listen failed: af=%s ports=%u-%u"
+			" (%m)\n", net_af2name(af),
+			s->cfg.rtp_ports.min, s->cfg.rtp_ports.max, err);
 		return err;
+	}
 
 	tos = s->cfg.rtp_tos;
 	(void)udp_setsockopt(rtp_sock(s->rtp), IPPROTO_IP, IP_TOS,
@@ -206,27 +347,31 @@ static int stream_sock_alloc(struct stream *s, int af)
 
 	udp_rxsz_set(rtp_sock(s->rtp), RTP_RECV_SIZE);
 
+	udp_sockbuf_set(rtp_sock(s->rtp), 65536);
+
 	return 0;
 }
 
 
-int stream_alloc(struct stream **sp, const struct config_avt *cfg,
+int stream_alloc(struct stream **sp, const struct stream_param *prm,
+		 const struct config_avt *cfg,
 		 struct call *call, struct sdp_session *sdp_sess,
 		 const char *name, int label,
 		 const struct mnat *mnat, struct mnat_sess *mnat_sess,
 		 const struct menc *menc, struct menc_sess *menc_sess,
-		 const char *cname,
 		 stream_rtp_h *rtph, stream_rtcp_h *rtcph, void *arg)
 {
 	struct stream *s;
 	int err;
 
-	if (!sp || !cfg || !call || !rtph)
+	if (!sp || !prm || !cfg || !rtph)
 		return EINVAL;
 
 	s = mem_zalloc(sizeof(*s), stream_destructor);
 	if (!s)
 		return ENOMEM;
+
+	MAGIC_INIT(s);
 
 	s->cfg   = *cfg;
 	s->call  = call;
@@ -234,13 +379,17 @@ int stream_alloc(struct stream **sp, const struct config_avt *cfg,
 	s->rtcph = rtcph;
 	s->arg   = arg;
 	s->pseq  = -1;
-	s->rtcp  = s->cfg.rtcp_enable;
 
-	err = stream_sock_alloc(s, call_af(call));
-	if (err)
-		goto out;
+	if (prm->use_rtp) {
+		err = stream_sock_alloc(s, prm->af);
+		if (err) {
+			warning("stream: failed to create socket"
+				" for media '%s' (%m)\n", name, err);
+			goto out;
+		}
+	}
 
-	err = str_dup(&s->cname, cname);
+	err = str_dup(&s->cname, prm->cname);
 	if (err)
 		goto out;
 
@@ -254,7 +403,7 @@ int stream_alloc(struct stream **sp, const struct config_avt *cfg,
 	}
 
 	err = sdp_media_add(&s->sdp, sdp_sess, name,
-			    sa_port(rtp_local(s->rtp)),
+			    s->rtp ? sa_port(rtp_local(s->rtp)) : 9,
 			    (menc && menc->sdp_proto) ? menc->sdp_proto :
 			    sdp_proto_rtpavp);
 	if (err)
@@ -266,15 +415,12 @@ int stream_alloc(struct stream **sp, const struct config_avt *cfg,
 	}
 
 	/* RFC 5506 */
-	if (s->rtcp)
-		err |= sdp_media_set_lattr(s->sdp, true, "rtcp-rsize", NULL);
+	err |= sdp_media_set_lattr(s->sdp, true, "rtcp-rsize", NULL);
 
 	/* RFC 5576 */
-	if (s->rtcp) {
-		err |= sdp_media_set_lattr(s->sdp, true,
-					   "ssrc", "%u cname:%s",
-					   rtp_sess_ssrc(s->rtp), cname);
-	}
+	err |= sdp_media_set_lattr(s->sdp, true,
+				   "ssrc", "%u cname:%s",
+				   rtp_sess_ssrc(s->rtp), prm->cname);
 
 	/* RFC 5761 */
 	if (cfg->rtcp_mux)
@@ -283,23 +429,23 @@ int stream_alloc(struct stream **sp, const struct config_avt *cfg,
 	if (err)
 		goto out;
 
-	if (mnat) {
+	if (mnat && s->rtp) {
 		err = mnat->mediah(&s->mns, mnat_sess, IPPROTO_UDP,
 				   rtp_sock(s->rtp),
-				   s->rtcp ? rtcp_sock(s->rtp) : NULL,
+				   rtcp_sock(s->rtp),
 				   s->sdp);
 		if (err)
 			goto out;
 	}
 
-	if (menc) {
+	if (menc && s->rtp) {
 		s->menc  = menc;
 		s->mencs = mem_ref(menc_sess);
 		err = menc->mediah(&s->mes, menc_sess,
 				   s->rtp,
 				   IPPROTO_UDP,
 				   rtp_sock(s->rtp),
-				   s->rtcp ? rtcp_sock(s->rtp) : NULL,
+				   rtcp_sock(s->rtp),
 				   s->sdp);
 		if (err)
 			goto out;
@@ -325,35 +471,20 @@ int stream_alloc(struct stream **sp, const struct config_avt *cfg,
 }
 
 
-struct sdp_media *stream_sdpmedia(const struct stream *s)
+/**
+ * Get the sdp object from the stream
+ *
+ * @param strm Stream object
+ *
+ * @return SDP media object
+ */
+struct sdp_media *stream_sdpmedia(const struct stream *strm)
 {
-	return s ? s->sdp : NULL;
+	return strm ? strm->sdp : NULL;
 }
 
 
-static void stream_start_keepalive(struct stream *s)
-{
-	const char *rtpkeep;
-
-	if (!s)
-		return;
-
-	rtpkeep = ua_prm(call_get_ua(s->call))->rtpkeep;
-
-	s->rtpkeep = mem_deref(s->rtpkeep);
-
-	if (rtpkeep && sdp_media_rformat(s->sdp, NULL)) {
-		int err;
-		err = rtpkeep_alloc(&s->rtpkeep, rtpkeep,
-				    IPPROTO_UDP, s->rtp, s->sdp);
-		if (err) {
-			warning("stream: rtpkeep_alloc failed: %m\n", err);
-		}
-	}
-}
-
-
-int stream_send(struct stream *s, bool marker, int pt, uint32_t ts,
+int stream_send(struct stream *s, bool ext, bool marker, int pt, uint32_t ts,
 		struct mbuf *mb)
 {
 	int err = 0;
@@ -363,7 +494,9 @@ int stream_send(struct stream *s, bool marker, int pt, uint32_t ts,
 
 	if (!sa_isset(sdp_media_raddr(s->sdp), SA_ALL))
 		return 0;
-	if (sdp_media_dir(s->sdp) != SDP_SENDRECV)
+	if (!(sdp_media_rdir(s->sdp) & SDP_SENDONLY))
+		return 0;
+	if (s->hold)
 		return 0;
 
 	metric_add_packet(&s->metric_tx, mbuf_get_left(mb));
@@ -372,13 +505,11 @@ int stream_send(struct stream *s, bool marker, int pt, uint32_t ts,
 		pt = s->pt_enc;
 
 	if (pt >= 0) {
-		err = rtp_send(s->rtp, sdp_media_raddr(s->sdp),
+		err = rtp_send(s->rtp, sdp_media_raddr(s->sdp), ext,
 			       marker, pt, ts, mb);
 		if (err)
 			s->metric_tx.n_err++;
 	}
-
-	rtpkeep_refresh(s->rtpkeep, ts);
 
 	return err;
 }
@@ -409,6 +540,11 @@ static void stream_remote_set(struct stream *s)
 }
 
 
+/**
+ * Update the media stream
+ *
+ * @param s Stream object
+ */
 void stream_update(struct stream *s)
 {
 	const struct sdp_format *fmt;
@@ -428,7 +564,7 @@ void stream_update(struct stream *s)
 		err = s->menc->mediah(&s->mes, s->mencs, s->rtp,
 				      IPPROTO_UDP,
 				      rtp_sock(s->rtp),
-				      s->rtcp ? rtcp_sock(s->rtp) : NULL,
+				      rtcp_sock(s->rtp),
 				      s->sdp);
 		if (err) {
 			warning("stream: mediaenc update: %m\n", err);
@@ -439,6 +575,9 @@ void stream_update(struct stream *s)
 
 void stream_update_encoder(struct stream *s, int pt_enc)
 {
+	if (!s)
+		return;
+
 	if (pt_enc >= 0)
 		s->pt_enc = pt_enc;
 }
@@ -473,6 +612,7 @@ void stream_hold(struct stream *s, bool hold)
 	if (!s)
 		return;
 
+	s->hold = hold;
 	sdp_media_set_ldir(s->sdp, hold ? SDP_SENDONLY : SDP_SENDRECV);
 }
 
@@ -513,8 +653,6 @@ void stream_reset(struct stream *s)
 		return;
 
 	jbuf_flush(s->jbuf);
-
-	stream_start_keepalive(s);
 }
 
 
@@ -524,6 +662,37 @@ void stream_set_bw(struct stream *s, uint32_t bps)
 		return;
 
 	sdp_media_set_lbandwidth(s->sdp, SDP_BANDWIDTH_AS, bps / 1000);
+}
+
+
+void stream_enable_rtp_timeout(struct stream *strm, uint32_t timeout_ms)
+{
+	if (!strm)
+		return;
+
+	strm->rtp_timeout_ms = timeout_ms;
+
+	tmr_cancel(&strm->tmr_rtp);
+
+	if (timeout_ms) {
+
+		info("stream: Enable RTP timeout (%u milliseconds)\n",
+		     timeout_ms);
+
+		strm->ts_last = tmr_jiffies();
+		tmr_start(&strm->tmr_rtp, 10, check_rtp_handler, strm);
+	}
+}
+
+
+void stream_set_error_handler(struct stream *strm,
+			      stream_error_h *errorh, void *arg)
+{
+	if (!strm)
+		return;
+
+	strm->errorh     = errorh;
+	strm->errorh_arg = arg;
 }
 
 
@@ -562,3 +731,120 @@ int stream_print(struct re_printf *pf, const struct stream *s)
 }
 
 
+/**
+ * Get the RTCP Statistics from a media stream
+ *
+ * @param strm Stream object
+ *
+ * @return RTCP Statistics
+ */
+const struct rtcp_stats *stream_rtcp_stats(const struct stream *strm)
+{
+	return strm ? &strm->rtcp_stats : NULL;
+}
+
+
+/**
+ * Get the call object from the stream
+ *
+ * @param strm Stream object
+ *
+ * @return Call object
+ */
+struct call *stream_call(const struct stream *strm)
+{
+	return strm ? strm->call : NULL;
+}
+
+
+/**
+ * Get the number of transmitted RTP packets
+ *
+ * @param strm Stream object
+ *
+ * @return Number of transmitted RTP packets
+ */
+uint32_t stream_metric_get_tx_n_packets(const struct stream *strm)
+{
+	return strm ? strm->metric_tx.n_packets : 0;
+}
+
+
+/**
+ * Get the number of transmitted RTP bytes
+ *
+ * @param strm Stream object
+ *
+ * @return Number of transmitted RTP bytes
+ */
+uint32_t stream_metric_get_tx_n_bytes(const struct stream *strm)
+{
+	return strm ? strm->metric_tx.n_bytes : 0;
+}
+
+
+/**
+ * Get the number of transmission errors
+ *
+ * @param strm Stream object
+ *
+ * @return Number of transmission errors
+ */
+uint32_t stream_metric_get_tx_n_err(const struct stream *strm)
+{
+	return strm ? strm->metric_tx.n_err : 0;
+}
+
+
+/**
+ * Get the number of received RTP packets
+ *
+ * @param strm Stream object
+ *
+ * @return Number of received RTP packets
+ */
+uint32_t stream_metric_get_rx_n_packets(const struct stream *strm)
+{
+	return strm ? strm->metric_rx.n_packets : 0;
+}
+
+
+/**
+ * Get the number of received RTP bytes
+ *
+ * @param strm Stream object
+ *
+ * @return Number of received RTP bytes
+ */
+uint32_t stream_metric_get_rx_n_bytes(const struct stream *strm)
+{
+	return strm ? strm->metric_rx.n_bytes : 0;
+}
+
+
+/**
+ * Get the number of receive errors
+ *
+ * @param strm Stream object
+ *
+ * @return Number of receive errors
+ */
+uint32_t stream_metric_get_rx_n_err(const struct stream *strm)
+{
+	return strm ? strm->metric_rx.n_err : 0;
+}
+
+
+int stream_jbuf_reset(struct stream *strm,
+		      uint32_t frames_min, uint32_t frames_max)
+{
+	if (!strm)
+		return EINVAL;
+
+	strm->jbuf = mem_deref(strm->jbuf);
+
+	if (frames_min && frames_max)
+		return jbuf_alloc(&strm->jbuf, frames_min, frames_max);
+
+	return 0;
+}

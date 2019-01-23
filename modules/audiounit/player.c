@@ -7,15 +7,17 @@
 #include <AudioToolbox/AudioToolbox.h>
 #include <pthread.h>
 #include <re.h>
+#include <rem.h>
 #include <baresip.h>
 #include "audiounit.h"
 
 
 struct auplay_st {
-	struct auplay *ap;      /* inheritance */
+	const struct auplay *ap;      /* inheritance */
 	struct audiosess_st *sess;
 	AudioUnit au;
 	pthread_mutex_t mutex;
+	uint32_t sampsz;
 	auplay_write_h *wh;
 	void *arg;
 };
@@ -34,7 +36,6 @@ static void auplay_destructor(void *arg)
 	AudioComponentInstanceDispose(st->au);
 
 	mem_deref(st->sess);
-	mem_deref(st->ap);
 
 	pthread_mutex_destroy(&st->mutex);
 }
@@ -69,7 +70,7 @@ static OSStatus output_callback(void *inRefCon,
 
 		AudioBuffer *ab = &ioData->mBuffers[i];
 
-		wh(ab->mData, ab->mDataByteSize/2, arg);
+		wh(ab->mData, ab->mDataByteSize/st->sampsz, arg);
 	}
 
 	return 0;
@@ -87,27 +88,38 @@ static void interrupt_handler(bool interrupted, void *arg)
 }
 
 
-int audiounit_player_alloc(struct auplay_st **stp, struct auplay *ap,
+int audiounit_player_alloc(struct auplay_st **stp, const struct auplay *ap,
 			   struct auplay_prm *prm, const char *device,
 			   auplay_write_h *wh, void *arg)
 {
 	AudioStreamBasicDescription fmt;
-	AudioUnitElement outputBus = 0;
+	const AudioUnitElement outputBus = 0;
 	AURenderCallbackStruct cb;
 	struct auplay_st *st;
-	UInt32 enable = 1;
+	const UInt32 enable = 1;
 	OSStatus ret = 0;
+	Float64 hw_srate = 0.0;
+	UInt32 hw_size = sizeof(hw_srate);
 	int err;
 
 	(void)device;
+
+	if (!stp || !ap || !prm)
+		return EINVAL;
 
 	st = mem_zalloc(sizeof(*st), auplay_destructor);
 	if (!st)
 		return ENOMEM;
 
-	st->ap  = mem_ref(ap);
+	st->ap  = ap;
 	st->wh  = wh;
 	st->arg = arg;
+
+	st->sampsz = (uint32_t)aufmt_sample_size(prm->fmt);
+	if (!st->sampsz) {
+		err = ENOTSUP;
+		goto out;
+	}
 
 	err = pthread_mutex_init(&st->mutex, NULL);
 	if (err)
@@ -117,29 +129,33 @@ int audiounit_player_alloc(struct auplay_st **stp, struct auplay *ap,
 	if (err)
 		goto out;
 
-	ret = AudioComponentInstanceNew(output_comp, &st->au);
+	ret = AudioComponentInstanceNew(audiounit_comp_io, &st->au);
 	if (ret)
 		goto out;
 
 	ret = AudioUnitSetProperty(st->au, kAudioOutputUnitProperty_EnableIO,
 				   kAudioUnitScope_Output, outputBus,
 				   &enable, sizeof(enable));
-	if (ret)
+	if (ret) {
+		warning("audiounit: EnableIO failed (%d)\n", ret);
 		goto out;
+	}
 
 	fmt.mSampleRate       = prm->srate;
 	fmt.mFormatID         = kAudioFormatLinearPCM;
 #if TARGET_OS_IPHONE
-	fmt.mFormatFlags      = kAudioFormatFlagsCanonical;
+	fmt.mFormatFlags      = audiounit_aufmt_to_formatflags(prm->fmt)
+		| kAudioFormatFlagsNativeEndian
+		| kAudioFormatFlagIsPacked;
 #else
-	fmt.mFormatFlags      = kLinearPCMFormatFlagIsSignedInteger
-		| kLinearPCMFormatFlagIsPacked;
+	fmt.mFormatFlags      = audiounit_aufmt_to_formatflags(prm->fmt)
+		| kAudioFormatFlagIsPacked;
 #endif
-	fmt.mBitsPerChannel   = 16;
+	fmt.mBitsPerChannel   = 8 * st->sampsz;
 	fmt.mChannelsPerFrame = prm->ch;
-	fmt.mBytesPerFrame    = 2 * prm->ch;
+	fmt.mBytesPerFrame    = st->sampsz * prm->ch;
 	fmt.mFramesPerPacket  = 1;
-	fmt.mBytesPerPacket   = 2 * prm->ch;
+	fmt.mBytesPerPacket   = st->sampsz * prm->ch;
 
 	ret = AudioUnitInitialize(st->au);
 	if (ret)
@@ -163,6 +179,18 @@ int audiounit_player_alloc(struct auplay_st **stp, struct auplay *ap,
 	ret = AudioOutputUnitStart(st->au);
 	if (ret)
 		goto out;
+
+	ret = AudioUnitGetProperty(st->au,
+				   kAudioUnitProperty_SampleRate,
+				   kAudioUnitScope_Output,
+				   outputBus,
+				   &hw_srate,
+				   &hw_size);
+	if (ret)
+		goto out;
+
+	debug("audiounit: player hardware sample rate is now at %f Hz\n",
+	      hw_srate);
 
  out:
 	if (ret) {

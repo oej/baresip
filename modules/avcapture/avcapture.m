@@ -9,7 +9,14 @@
 #include <AVFoundation/AVFoundation.h>
 
 
-static struct vidsrc *vidsrcv[4];
+/**
+ * @defgroup avcapture avcapture
+ *
+ * Video source using OSX/iOS AVFoundation
+ */
+
+
+static struct vidsrc *vidsrc;
 
 
 @interface avcap : NSObject < AVCaptureVideoDataOutputSampleBufferDelegate >
@@ -24,7 +31,7 @@ static struct vidsrc *vidsrcv[4];
 
 
 struct vidsrc_st {
-	struct vidsrc *vs;
+	const struct vidsrc *vs;
 	avcap *cap;
 	vidsrc_frame_h *frameh;
 	void *arg;
@@ -96,9 +103,14 @@ static void vidframe_set_pixbuf(struct vidframe *f, const CVImageBufferRef b)
 		struct vidsz sz;
 		NSString * const * preset;
 	} mapv[] = {
-		{{ 192, 144}, &AVCaptureSessionPresetLow     },
-		{{ 480, 360}, &AVCaptureSessionPresetMedium  },
-		{{ 640, 480}, &AVCaptureSessionPresetHigh    },
+#if !TARGET_OS_IPHONE
+		{{ 320 ,240}, &AVCaptureSessionPreset320x240 },
+#endif
+		{{ 352, 288}, &AVCaptureSessionPreset352x288 },
+		{{ 640, 480}, &AVCaptureSessionPreset640x480 },
+#if !TARGET_OS_IPHONE
+		{{ 960, 540}, &AVCaptureSessionPreset960x540 },
+#endif
 		{{1280, 720}, &AVCaptureSessionPreset1280x720}
 	};
 	int i, best = -1;
@@ -111,9 +123,8 @@ static void vidframe_set_pixbuf(struct vidframe *f, const CVImageBufferRef b)
 		    ![dev supportsAVCaptureSessionPreset:preset])
 			continue;
 
-		if (mapv[i].sz.w >= sz->w && mapv[i].sz.h >= sz->h)
-			best = i;
-		else
+		best = i;
+		if (mapv[i].sz.w <= sz->w && mapv[i].sz.h <= sz->h)
 			break;
 	}
 
@@ -121,7 +132,7 @@ static void vidframe_set_pixbuf(struct vidframe *f, const CVImageBufferRef b)
 		return *mapv[best].preset;
 	else {
 		NSLog(@"no suitable preset found for %d x %d", sz->w, sz->h);
-		return AVCaptureSessionPresetHigh;
+		return AVCaptureSessionPreset352x288;
 	}
 }
 
@@ -227,7 +238,9 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
        fromConnection:(AVCaptureConnection *)conn
 {
 	const CVImageBufferRef b = CMSampleBufferGetImageBuffer(sampleBuffer);
+	CMTime ts = CMSampleBufferGetOutputPresentationTimeStamp(sampleBuffer);
 	struct vidframe vf;
+	uint64_t timestamp;
 
 	(void)captureOutput;
 	(void)conn;
@@ -239,8 +252,10 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 	vidframe_set_pixbuf(&vf, b);
 
+	timestamp = CMTimeGetSeconds(ts) * VIDEO_TIMEBASE;
+
 	if (vidframe_isvalid(&vf))
-		vsrc->frameh(&vf, vsrc->arg);
+		vsrc->frameh(&vf, timestamp, vsrc->arg);
 
 	CVPixelBufferUnlockBaseAddress(b, 0);
 }
@@ -282,12 +297,10 @@ static void destructor(void *arg)
 	        waitUntilDone:YES];
 
 	[st->cap release];
-
-	mem_deref(st->vs);
 }
 
 
-static int alloc(struct vidsrc_st **stp, struct vidsrc *vs,
+static int alloc(struct vidsrc_st **stp, const struct vidsrc *vs,
 		 struct media_ctx **ctx, struct vidsrc_prm *prm,
 		 const struct vidsz *size, const char *fmt,
 		 const char *dev, vidsrc_frame_h *frameh,
@@ -312,7 +325,7 @@ static int alloc(struct vidsrc_st **stp, struct vidsrc *vs,
 
 	pool = [NSAutoreleasePool new];
 
-	st->vs     = mem_ref(vs);
+	st->vs     = vs;
 	st->frameh = frameh;
 	st->arg    = arg;
 
@@ -354,26 +367,30 @@ static int module_init(void)
 	AVCaptureDevice *dev = nil;
 	NSAutoreleasePool *pool;
 	Class cls = NSClassFromString(@"AVCaptureDevice");
-	size_t i = 0;
 	int err = 0;
 	if (!cls)
 		return ENOSYS;
 
 	pool = [NSAutoreleasePool new];
 
+	err = vidsrc_register(&vidsrc, baresip_vidsrcl(),
+			      "avcapture", alloc, update);
+	if (err)
+		goto out;
+
 	/* populate devices */
 	for (dev in [AVCaptureDevice devicesWithMediaType:AVMediaTypeVideo]) {
 
 		const char *name = [[dev localizedName] UTF8String];
 
-		if (i >= ARRAY_SIZE(vidsrcv))
-			break;
+		debug("avcapture: found video device '%s'\n", name);
 
-		err = vidsrc_register(&vidsrcv[i++], name, alloc, update);
+		err = mediadev_add(&vidsrc->dev_list, name);
 		if (err)
-			break;
+			goto out;
 	}
 
+ out:
 	[pool drain];
 
 	return err;
@@ -382,10 +399,7 @@ static int module_init(void)
 
 static int module_close(void)
 {
-	size_t i;
-
-	for (i=0; i<ARRAY_SIZE(vidsrcv); i++)
-		vidsrcv[i] = mem_deref(vidsrcv[i]);
+	vidsrc = mem_deref(vidsrc);
 
 	return 0;
 }

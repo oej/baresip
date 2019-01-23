@@ -3,6 +3,7 @@
  *
  * Copyright (C) 2010 Creytiv.com
  */
+#define _DEFAULT_SOURCE 1
 #define _BSD_SOURCE 1
 #include <fcntl.h>
 #ifdef HAVE_UNISTD_H
@@ -31,7 +32,7 @@
 #endif
 
 
-#if defined (WIN32) || defined (__SYMBIAN32__)
+#if defined (WIN32)
 #define DIR_SEP "\\"
 #else
 #define DIR_SEP "/"
@@ -62,7 +63,7 @@ bool conf_fileexist(const char *path)
 	if ((st.st_mode & S_IFMT) != S_IFREG)
 		 return false;
 
-	return st.st_size > 0;
+	return true;
 }
 
 
@@ -77,10 +78,11 @@ static void print_populated(const char *what, uint32_t n)
  *
  * @param filename Config file
  * @param ch       Line handler
+ * @param arg      Handler argument
  *
  * @return 0 if success, otherwise errorcode
  */
-int conf_parse(const char *filename, confline_h *ch)
+int conf_parse(const char *filename, confline_h *ch, void *arg)
 {
 	struct pl pl, val;
 	struct mbuf *mb;
@@ -121,7 +123,7 @@ int conf_parse(const char *filename, confline_h *ch)
 		if (!val.l || val.p[0] == '#')
 			continue;
 
-		err = ch(&val);
+		err = ch(&val, arg);
 	}
 
  out:
@@ -153,7 +155,7 @@ void conf_path_set(const char *path)
  */
 int conf_path_get(char *path, size_t sz)
 {
-	char buf[256];
+	char buf[FS_PATH_MAX];
 	int err;
 
 	/* Use explicit conf path */
@@ -163,9 +165,14 @@ int conf_path_get(char *path, size_t sz)
 		return 0;
 	}
 
+#ifdef CONFIG_PATH
+	str_ncpy(buf, CONFIG_PATH, sizeof(buf));
+	(void)err;
+#else
 	err = fs_gethome(buf, sizeof(buf));
 	if (err)
 		return err;
+#endif
 
 	if (re_snprintf(path, sz, "%s" DIR_SEP ".baresip", buf) < 0)
 		return ENOMEM;
@@ -236,6 +243,15 @@ int conf_get_csv(const struct conf *conf, const char *name,
 }
 
 
+/**
+ * Get the video size of a configuration item
+ *
+ * @param conf Configuration object
+ * @param name Name of config item key
+ * @param sz   Returned video size of config item, if present
+ *
+ * @return 0 if success, otherwise errorcode
+ */
 int conf_get_vidsz(const struct conf *conf, const char *name, struct vidsz *sz)
 {
 	struct pl r, w, h;
@@ -266,6 +282,15 @@ int conf_get_vidsz(const struct conf *conf, const char *name, struct vidsz *sz)
 }
 
 
+/**
+ * Get the socket address of a configuration item
+ *
+ * @param conf Configuration object
+ * @param name Name of config item key
+ * @param sa   Returned socket address of config item, if present
+ *
+ * @return 0 if success, otherwise errorcode
+ */
 int conf_get_sa(const struct conf *conf, const char *name, struct sa *sa)
 {
 	struct pl opt;
@@ -282,6 +307,24 @@ int conf_get_sa(const struct conf *conf, const char *name, struct sa *sa)
 }
 
 
+int conf_get_float(const struct conf *conf, const char *name, double *val)
+{
+	struct pl opt;
+	int err;
+
+	if (!conf || !name || !val)
+		return EINVAL;
+
+	err = conf_get(conf, name, &opt);
+	if (err)
+		return err;
+
+	*val = pl_float(&opt);
+
+	return 0;
+}
+
+
 /**
  * Configure the system with default settings
  *
@@ -289,10 +332,10 @@ int conf_get_sa(const struct conf *conf, const char *name, struct sa *sa)
  */
 int conf_configure(void)
 {
-	char path[256], file[256];
+	char path[FS_PATH_MAX], file[FS_PATH_MAX];
 	int err;
 
-#if defined (WIN32) || defined (__SYMBIAN32__)
+#if defined (WIN32)
 	dbg_init(DBG_INFO, DBG_NONE);
 #endif
 
@@ -314,6 +357,7 @@ int conf_configure(void)
 			goto out;
 	}
 
+	conf_obj = mem_deref(conf_obj);
 	err = conf_alloc(&conf_obj, file);
 	if (err)
 		goto out;
@@ -323,7 +367,6 @@ int conf_configure(void)
 		goto out;
 
  out:
-	conf_obj = mem_deref(conf_obj);
 	return err;
 }
 
@@ -332,22 +375,12 @@ int conf_configure(void)
  * Load all modules from config file
  *
  * @return 0 if success, otherwise errorcode
+ *
+ * @note conf_configure must be called first
  */
 int conf_modules(void)
 {
-	char path[256], file[256];
 	int err;
-
-	err = conf_path_get(path, sizeof(path));
-	if (err)
-		return err;
-
-	if (re_snprintf(file, sizeof(file), "%s/config", path) < 0)
-		return ENOMEM;
-
-	err = conf_alloc(&conf_obj, file);
-	if (err)
-		goto out;
 
 	err = module_init(conf_obj);
 	if (err) {
@@ -355,15 +388,14 @@ int conf_modules(void)
 		goto out;
 	}
 
-	print_populated("audio codec",  list_count(aucodec_list()));
-	print_populated("audio filter", list_count(aufilt_list()));
+	print_populated("audio codec",  list_count(baresip_aucodecl()));
+	print_populated("audio filter", list_count(baresip_aufiltl()));
 #ifdef USE_VIDEO
-	print_populated("video codec",  list_count(vidcodec_list()));
-	print_populated("video filter", list_count(vidfilt_list()));
+	print_populated("video codec",  list_count(baresip_vidcodecl()));
+	print_populated("video filter", list_count(baresip_vidfiltl()));
 #endif
 
  out:
-	conf_obj = mem_deref(conf_obj);
 	return err;
 }
 
@@ -373,9 +405,21 @@ int conf_modules(void)
  *
  * @return Config object
  *
- * @note It is only available during init
+ * @note It is only available after init and before conf_close()
  */
 struct conf *conf_cur(void)
 {
+	if (!conf_obj) {
+		warning("conf: no config object\n");
+	}
 	return conf_obj;
+}
+
+
+/**
+ * Close the current configuration object
+ */
+void conf_close(void)
+{
+	conf_obj = mem_deref(conf_obj);
 }

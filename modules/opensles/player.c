@@ -4,6 +4,7 @@
  * Copyright (C) 2010 Creytiv.com
  */
 #include <re.h>
+#include <rem.h>
 #include <baresip.h>
 #include <SLES/OpenSLES.h>
 #include "SLES/OpenSLES_Android.h"
@@ -15,7 +16,7 @@
 
 
 struct auplay_st {
-	struct auplay *ap;      /* inheritance */
+	const struct auplay *ap;      /* inheritance */
 	auplay_write_h *wh;
 	void *arg;
 	int16_t *sampv[N_PLAY_QUEUE_BUFFERS];
@@ -43,8 +44,6 @@ static void auplay_destructor(void *arg)
 	for (int i=0; i<N_PLAY_QUEUE_BUFFERS; i++) {
 		mem_deref(st->sampv[i]);
 	}
-
-	mem_deref(st->ap);
 }
 
 
@@ -86,11 +85,14 @@ static int createPlayer(struct auplay_st *st, struct auplay_prm *prm)
 	SLDataLocator_AndroidSimpleBufferQueue loc_bufq = {
 		SL_DATALOCATOR_ANDROIDSIMPLEBUFFERQUEUE, 2
 	};
+	uint32_t ch_mask = prm->ch == 2
+		? SL_SPEAKER_FRONT_LEFT | SL_SPEAKER_FRONT_RIGHT
+		: SL_SPEAKER_FRONT_CENTER;
 	SLDataFormat_PCM format_pcm = {SL_DATAFORMAT_PCM, prm->ch,
 				       prm->srate * 1000,
 				       SL_PCMSAMPLEFORMAT_FIXED_16,
 				       SL_PCMSAMPLEFORMAT_FIXED_16,
-				       SL_SPEAKER_FRONT_CENTER,
+				       ch_mask,
 				       SL_BYTEORDER_LITTLEENDIAN};
 	SLDataSource audioSrc = {&loc_bufq, &format_pcm};
 	SLDataLocator_OutputMix loc_outmix = {
@@ -141,7 +143,7 @@ static int createPlayer(struct auplay_st *st, struct auplay_prm *prm)
 }
 
 
-int opensles_player_alloc(struct auplay_st **stp, struct auplay *ap,
+int opensles_player_alloc(struct auplay_st **stp, const struct auplay *ap,
 			  struct auplay_prm *prm, const char *device,
 			  auplay_write_h *wh, void *arg)
 {
@@ -152,11 +154,20 @@ int opensles_player_alloc(struct auplay_st **stp, struct auplay *ap,
 	if (!stp || !ap || !prm || !wh)
 		return EINVAL;
 
+	if (prm->fmt != AUFMT_S16LE) {
+		warning("opensles: player: unsupported sample format (%s)\n",
+			aufmt_name(prm->fmt));
+		return ENOTSUP;
+	}
+
+	debug("opensles: opening player %uHz, %uchannels\n",
+			prm->srate, prm->ch);
+
 	st = mem_zalloc(sizeof(*st), auplay_destructor);
 	if (!st)
 		return ENOMEM;
 
-	st->ap  = mem_ref(ap);
+	st->ap  = ap;
 	st->wh  = wh;
 	st->arg = arg;
 

@@ -7,8 +7,14 @@
 #include <re.h>
 #include <rem.h>
 #include <baresip.h>
+#include <libavutil/pixdesc.h>
 #include <libavcodec/avcodec.h>
 #include "h265.h"
+
+
+#if LIBAVUTIL_VERSION_MAJOR < 52
+#define AV_PIX_FMT_YUV420P PIX_FMT_YUV420P
+#endif
 
 
 enum {
@@ -23,7 +29,7 @@ enum {
 struct fu {
 	unsigned s:1;
 	unsigned e:1;
-	unsigned type:5;
+	unsigned type:6;
 };
 
 struct viddec_state {
@@ -69,7 +75,8 @@ int h265_decode_update(struct viddec_state **vdsp, const struct vidcodec *vc,
 	if (vds)
 		return 0;
 
-	codec = avcodec_find_decoder(AV_CODEC_ID_H265);
+	/* HEVC = H.265 */
+	codec = avcodec_find_decoder(AV_CODEC_ID_HEVC);
 	if (!codec) {
 		warning("h265: could not find H265 decoder\n");
 		return ENOSYS;
@@ -143,15 +150,18 @@ static inline void fragment_rewind(struct viddec_state *vds)
 
 
 int h265_decode(struct viddec_state *vds, struct vidframe *frame,
-		bool marker, uint16_t seq, struct mbuf *mb)
+		bool *intra, bool marker, uint16_t seq, struct mbuf *mb)
 {
 	static const uint8_t nal_seq[3] = {0, 0, 1};
 	int err, ret, got_picture, i;
 	struct h265_nal hdr;
 	AVPacket avpkt;
+	enum vidfmt fmt;
 
-	if (!vds || !frame || !mb)
+	if (!vds || !frame || !intra || !mb)
 		return EINVAL;
+
+	*intra = false;
 
 	err = h265_nal_decode(&hdr, mbuf_buf(mb));
 	if (err)
@@ -159,13 +169,12 @@ int h265_decode(struct viddec_state *vds, struct vidframe *frame,
 
 	mbuf_advance(mb, H265_HDR_SIZE);
 
-#if 1
+#if 0
 	debug("h265: decode: %s type=%2d  %s\n",
 		  h265_is_keyframe(hdr.nal_unit_type) ? "<KEY>" : "     ",
 		  hdr.nal_unit_type,
 		  h265_nalunit_name(hdr.nal_unit_type));
 #endif
-
 
 	if (vds->frag && hdr.nal_unit_type != H265_NAL_FU) {
 		debug("h265: lost fragments; discarding previous NAL\n");
@@ -175,6 +184,9 @@ int h265_decode(struct viddec_state *vds, struct vidframe *frame,
 
 	/* handle NAL types */
 	if (0 <= hdr.nal_unit_type && hdr.nal_unit_type <= 40) {
+
+		if (h265_is_keyframe(hdr.nal_unit_type))
+			*intra = true;
 
 		mb->pos -= H265_HDR_SIZE;
 
@@ -192,6 +204,9 @@ int h265_decode(struct viddec_state *vds, struct vidframe *frame,
 			return err;
 
 		if (fu.s) {
+			if (h265_is_keyframe(fu.type))
+				*intra = true;
+
 			if (vds->frag) {
 				debug("h265: lost fragments; ignoring NAL\n");
 				fragment_rewind(vds);
@@ -231,8 +246,11 @@ int h265_decode(struct viddec_state *vds, struct vidframe *frame,
 		vds->frag_seq = seq;
 	}
 	else {
-		warning("h265: unknown NAL type %u\n", hdr.nal_unit_type);
-		return ENOSYS;
+		warning("h265: unknown NAL type %u (%s) [%zu bytes]\n",
+			hdr.nal_unit_type,
+			h265_nalunit_name(hdr.nal_unit_type),
+			mbuf_get_left(mb));
+		return EPROTO;
 	}
 
 	if (!marker) {
@@ -255,20 +273,50 @@ int h265_decode(struct viddec_state *vds, struct vidframe *frame,
 	avpkt.data = vds->mb->buf;
 	avpkt.size = (int)vds->mb->end;
 
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(57, 37, 100)
+
+	ret = avcodec_send_packet(vds->ctx, &avpkt);
+	if (ret < 0) {
+		err = EBADMSG;
+		goto out;
+	}
+
+	ret = avcodec_receive_frame(vds->ctx, vds->pict);
+	if (ret < 0) {
+		err = EBADMSG;
+		goto out;
+	}
+
+	got_picture = true;
+
+#else
 	ret = avcodec_decode_video2(vds->ctx, vds->pict, &got_picture, &avpkt);
 	if (ret < 0) {
 		debug("h265: decode error\n");
 		err = EPROTO;
 		goto out;
 	}
+#endif
 
 	if (!got_picture) {
 		/* debug("h265: no picture\n"); */
 		goto out;
 	}
 
-	if (vds->pict->format != PIX_FMT_YUV420P) {
-		warning("h265: bad pixel format (%i)\n", vds->pict->format);
+	switch (vds->pict->format) {
+
+	case AV_PIX_FMT_YUV420P:
+		fmt = VID_FMT_YUV420P;
+		break;
+
+	case AV_PIX_FMT_YUV444P:
+		fmt = VID_FMT_YUV444P;
+		break;
+
+	default:
+		warning("h265: decode: bad pixel format (%i) (%s)\n",
+			vds->pict->format,
+			av_get_pix_fmt_name(vds->pict->format));
 		goto out;
 	}
 
@@ -279,7 +327,7 @@ int h265_decode(struct viddec_state *vds, struct vidframe *frame,
 
 	frame->size.w = vds->ctx->width;
 	frame->size.h = vds->ctx->height;
-	frame->fmt    = VID_FMT_YUV420P;
+	frame->fmt    = fmt;
 
  out:
 	mbuf_rewind(vds->mb);
